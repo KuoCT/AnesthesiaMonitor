@@ -1,10 +1,17 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QRect, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen
+import ctypes
+import sys
+from pathlib import Path
+
+from PySide6.QtCore import QRect, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
+    QCheckBox,
     QComboBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -12,10 +19,18 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QSpinBox,
     QSplitter,
+    QStatusBar,
+    QStyle,
+    QStyleOptionButton,
     QVBoxLayout,
     QWidget,
 )
+
+
+# 資源路徑
+ASSET_DIR = Path(__file__).resolve().parent / "asset" # SVG 圖示資料夾
 
 
 # 顏色 helper：用 HEX code 設定 Qt 顏色
@@ -23,9 +38,51 @@ def hex_color(value: str) -> QColor:
     return QColor(value)
 
 
+# 將 HEX 轉成 Windows DWM 使用的 COLORREF
+def hex_to_colorref(value: str) -> int:
+    color = QColor(value)
+    return color.red() | (color.green() << 8) | (color.blue() << 16)
+
+
+# 設定 Windows 原生標題列深色
+def set_windows_title_bar_color(window: QWidget) -> None:
+    if sys.platform != "win32":
+        return
+
+    try:
+        hwnd = int(window.winId())
+        dwmapi = ctypes.windll.dwmapi
+        true_value = ctypes.c_int(1)
+        caption_color = ctypes.c_int(hex_to_colorref(TITLE_BAR_HEX))
+        text_color = ctypes.c_int(hex_to_colorref(TITLE_TEXT_HEX))
+
+        # Windows 10/11 的深色標題列屬性版本可能不同，兩個都嘗試
+        for attribute in (20, 19):
+            dwmapi.DwmSetWindowAttribute(
+                hwnd,
+                attribute,
+                ctypes.byref(true_value),
+                ctypes.sizeof(true_value),
+            )
+
+        # Windows 11 支援直接指定標題列與文字顏色
+        for attribute, value in ((35, caption_color), (36, text_color)):
+            dwmapi.DwmSetWindowAttribute(
+                hwnd,
+                attribute,
+                ctypes.byref(value),
+                ctypes.sizeof(value),
+            )
+    except Exception:
+        return
+
+
 # 參數控制區
-APP_TITLE = "Anesthesia Monitor"
+DEFAULT_APP_SIZE = (1080, 780) # 啟動時 app 寬高
+TOOLBAR_GROUP_WIDTH = 1020 # toolbar 透明群組固定寬度
 APP_BG_HEX = "#18191A" # App 主背景
+TITLE_BAR_HEX = "#18191A" # Windows 原生標題列顏色
+TITLE_TEXT_HEX = "#e8e8e8" # Windows 原生標題列文字顏色
 CONTROL_BG_HEX = "#383B3F" # 按鈕和下拉選單背景
 CONTROL_HOVER_HEX = "#141414" # 按鈕和下拉選單 hover 背景
 CONTROL_PRESSED_HEX = "#2F3031" # 按鈕按下時背景
@@ -38,6 +95,7 @@ WAVE_GRID_HEX = "#8F8F92" # 示波器格線顏色
 WAVE_LINE_HEX = "#43a1df" # 示波器波型顏色
 WAVE_CURSOR_HEX = "#ffc14d" # 示波器掃描游標顏色
 WAVE_THRESHOLD_HEX = "#e73e3e" # 示波器 threshold 線顏色
+RPM_VALUE_HEX = WAVE_LINE_HEX # RPM 數值顏色
 CARD_BORDER_HEX = "#555555" # 右側資訊卡外框顏色
 ROI_PAUSED_HEX = "#35d46a" # 暫停編輯時的 ROI 顏色
 ROI_PLAYING_HEX = "#e73e3e" # 播放追蹤時的 ROI 顏色
@@ -52,47 +110,125 @@ ROI_LINE_WIDTH = 1 # ROI 框線粗細
 ROI_CENTER_SIZE = 6 # ROI 中心控制點大小
 ROI_HANDLE_SIZE = 6 # ROI 邊角調整點大小
 ROI_HANDLE_LINE_WIDTH = 1 # ROI 調整點外框粗細
-TRACKING_LINE_WIDTH = 2 # 中心位移線粗細
+TRACKING_LINE_WIDTH = 4 # 中心位移線粗細
 WAVE_THRESHOLD_LINE_WIDTH = 1 # 示波器 threshold 線粗細
-RPM_TEXT = "RPM" # 呼吸速率顯示標籤
-RESPIRATION_TEXT = "Respiration" # 呼吸速率卡片標籤
+RESPIRATION_TEXT = "Respiration (RPM)" # 呼吸速率標題
+SMOOTH_TEXT = "Smooth" # 訊號平滑顯示標籤
 THRESHOLD_TEXT = "Thresh." # threshold 顯示標籤
-RPM_VALUE_FONT_SIZE = 60 # 呼吸速率數值字體大小
-RPM_UNIT_FONT_SIZE = 10 # RPM 單位字體大小
-RESPIRATION_FONT_SIZE = 16 # Respiration 標籤字體大小
-RESPIRATION_PANEL_MIN_HEIGHT = 34 # 預設狀態避免 Respiration 被 RPM 擠到消失
+GAIN_TEXT = "Gain" # 示波器增益顯示標籤
+SENS_TEXT = "Range" # 偵測靈敏度顯示標籤
+WAVE_GRAPH_MARGIN_X = 16 # 示波器圖形左右留白
+WAVE_GRAPH_MARGIN_TOP = 8 # 示波器圖形上方留白
+WAVE_GRAPH_MARGIN_BOTTOM = 6 # 示波器標題下方留白
+WAVE_TITLE_HEIGHT = 20 # 示波器標題預留高度
+RESPIRATION_TITLE_HEIGHT = 20 # Respiration 與示波器標題共用高度
+WAVE_TITLE_MIN_VISIBLE_HEIGHT = 70 # 高度不足時優先隱藏示波器標題
+PANEL_TITLE_FONT_SIZE = 10 # 波型與 RPM 區標題字體大小
+RPM_VALUE_FONT_SIZE = 48 # 呼吸速率數值字體大小
+RESPIRATION_FONT_SIZE = 10 # Respiration 標題字體大小
+THRESHOLD_LABEL_MIN_HEIGHT = 22 # 拉桿標籤最小高度
+THRESHOLD_PANEL_MARGIN_X = 8 # Threshold 外框左右留白
+THRESHOLD_PANEL_MARGIN_Y = 6 # Threshold 外框上下留白
 WAVE_Y_AXIS_LABEL_WIDTH = 34 # 示波器 Y 軸 label 預留寬度
 WAVE_Y_AXIS_LABEL_FONT_SIZE = 10 # 示波器 Y 軸 label 字體大小
 PANEL_PADDING_Y = 10 # 板塊 3 上下留白
-DEFAULT_APP_SIZE = (860, 780) # 啟動時 app 寬高
+APP_CONTENT_MARGIN_X = 6 # app 內容左右留白
+APP_CONTENT_MARGIN_Y = 4 # app 內容上下留白
+APP_CONTENT_SPACING = 0 # toolbar 與主板塊間距
+TOOLBAR_ITEM_SPACING = 5 # toolbar 元件與群組固定間距
+TOOLBAR_GROUP_SPACING = 0 # toolbar 群組內 label 與輸入框間距
+TOOLBAR_GROUP_BORDER_HEX = CONTROL_BORDER_HEX # toolbar 數值群組外框顏色
+TOOLBAR_GROUP_BORDER_RADIUS = 4 # toolbar 數值群組外框圓角
+TOOLBAR_GROUP_PADDING_X = 5 # toolbar 數值群組左右內距
+TOOLBAR_GROUP_PADDING_Y = 3 # toolbar 數值群組上下內距
+TOOLBAR_GROUP_SPIN_HEIGHT = 24 # toolbar 數值群組內 QSpinBox 高度
+TOOLBAR_SPIN_MARGIN_RIGHT = 2 # toolbar QSpinBox 右側外距
+TOOLBAR_SPIN_VALUE_PADDING_X = 2 # toolbar QSpinBox 數值和箭頭保留距離
+TOOLBAR_MENU_STRETCH = 1 # toolbar 一般選單 expand 比例
+TOOLBAR_ENHANCE_STRETCH = 5 # toolbar Enhance 選單 expand 比例
+TOOLBAR_SPIN_GROUP_STRETCH = 1 # toolbar 數值群組 expand 比例
+CONTROL_PADDING_X = 6 # 控制元件左右 padding
+CONTROL_PADDING_Y = 6 # 控制元件上下 padding
+CHECKBOX_BORDER_HEX = CONTROL_BORDER_HEX # checkbox 外框顏色
+TOOLBAR_SCROLL_BG_HEX = APP_BG_HEX # toolbar scroll 背景色
+TOOLBAR_SCROLL_HANDLE_HEX = "#90929C" # toolbar scroll handle 顏色
+TOOLBAR_SCROLL_HANDLE_HOVER_HEX = "#71737A" # toolbar scroll hover 顏色
+TOOLBAR_SCROLLBAR_HEIGHT = 4 # toolbar 水平 scroll 高度
+CONTROL_WIDGET_HEIGHT = 32 # 按鈕和下拉選單統一高度
+LOAD_MODE_MENU_WIDTH = 82 # toolbar Load Mode menu 寬度
+CAMERA_MENU_WIDTH = 72 # toolbar Camera menu 寬度
+ENHANCEMENT_MENU_WIDTH = 126 # toolbar Enhancement menu 寬度
+CLEAR_ROI_BUTTON_WIDTH = 78 # toolbar Clear ROI 寬度
+RESET_BUTTON_WIDTH = 58 # toolbar Reset 寬度
+SHOW_RAW_CHECK_WIDTH = 85 # toolbar Show RAW checkbox 寬度
+DETECT_RATE_GROUP_WIDTH = 120 # toolbar Detect rate 群組寬度
+DETECT_RATE_LABEL_WIDTH = 64 # toolbar Detect rate label 寬度
+DETECT_RATE_SPIN_WIDTH = 46 # toolbar Detect rate 寬度
+SOUND_FREQ_GROUP_WIDTH = 125 # toolbar Sound freq. 群組寬度
+BEEP_LABEL_WIDTH = 70 # toolbar Sound freq. label 寬度
+BEEP_FREQ_SPIN_WIDTH = 45 # toolbar Beep Hz 寬度，最多顯示 4 位數
+MUTE_BUTTON_WIDTH = 58 # toolbar Mute 寬度
+TOPMOST_CHECK_WIDTH = 78 # toolbar Topmost checkbox 寬度
+STATUS_BAR_MAX_HEIGHT = 20 # 狀態列最大高度
+DEFAULT_MAX_ZOOM_SCALE = 16.0 # 影片滾輪縮放最大倍率
 DEFAULT_VERTICAL_SPLIT_RATIO = 0.22 # 上方板塊高度占比：1|2 / 3|4
-DEFAULT_TOP_HORIZONTAL_SPLIT_RATIO = 0.82 # 上方 1|2 左側示波器占比
-DEFAULT_BOTTOM_HORIZONTAL_SPLIT_RATIO = 0.90 # 下方 3|4 左側影像區占比
+DEFAULT_TOP_HORIZONTAL_SPLIT_RATIO = 0.83 # 上方 1|2 左側示波器占比
+DEFAULT_BOTTOM_HORIZONTAL_SPLIT_RATIO = 0.83 # 下方 3|4 左側影像區占比
 APP_STYLE_TEMPLATE = """
 QMainWindow, QWidget {{
     background-color: {app_bg};
     color: {text};
 }}
-#waveformPanel, #videoPanel, #controlPanel, #rpmPanel, #rpmValuePanel, #respirationPanel, #thresholdPanel {{
+#waveformPanel, #videoPanel, #controlPanel, #rpmPanel,
+#smoothPanel, #thresholdPanel, #gainPanel, #sensPanel {{
     background-color: {panel_bg};
 }}
 QLabel {{
     color: {text};
 }}
-QPushButton, QComboBox {{
+QPushButton, QComboBox, QSpinBox {{
     background-color: {control_bg};
     color: {bright_text};
     border: 1px solid {control_border};
     border-radius: 4px;
-    padding: 4px 8px;
+    padding: {control_padding_y}px {control_padding_x}px;
 }}
-QPushButton:hover, QComboBox:hover {{
+QPushButton:hover, QComboBox:hover, QSpinBox:hover {{
     background-color: {control_hover};
 }}
 QPushButton:pressed {{
     background-color: {control_pressed};
 }}
 QScrollArea {{
+    background-color: {app_bg};
+    border: none;
+    margin: 0;
+    padding: 0;
+}}
+QScrollBar:horizontal {{
+    background-color: {toolbar_scroll_bg};
+    border: none;
+    height: {toolbar_scrollbar_height}px;
+    margin: 0;
+}}
+QScrollBar::handle:horizontal {{
+    background-color: {toolbar_scroll_handle};
+    border-radius: 4px;
+    min-width: 32px;
+}}
+QScrollBar::handle:horizontal:hover {{
+    background-color: {toolbar_scroll_handle_hover};
+}}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+    background: none;
+    border: none;
+    width: 0;
+}}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+    background-color: {toolbar_scroll_bg};
+}}
+#toolbarContent {{
+    background-color: transparent;
     border: none;
 }}
 QSplitter::handle {{
@@ -115,13 +251,46 @@ QSlider::handle:vertical {{
     margin: 0 -{slider_handle_margin}px;
     border-radius: {slider_border_radius}px;
 }}
-#rpmValuePanel, #respirationPanel, #thresholdPanel {{
+#smoothPanel, #thresholdPanel, #gainPanel, #sensPanel {{
     background-color: {panel_bg};
     border: 1px solid {card_border};
     border-radius: 8px;
 }}
-#rpmPanel QLabel, #rpmValuePanel QLabel, #respirationPanel QLabel, #controlPanel QLabel, #thresholdPanel QLabel {{
+#controlPanel QLabel, #smoothPanel QLabel, #thresholdPanel QLabel,
+#gainPanel QLabel, #sensPanel QLabel {{
     background-color: {panel_bg};
+}}
+QStatusBar {{
+    background-color: {app_bg};
+    color: {text};
+    border-top: 1px solid {control_border};
+}}
+QStatusBar::item {{
+    border: none;
+}}
+QStatusBar QLabel {{
+    background-color: {app_bg};
+    color: {text};
+}}
+QCheckBox {{
+    background-color: transparent;
+    color: {bright_text};
+    spacing: 5px;
+}}
+#toolbarSpinGroup {{
+    background-color: {control_bg};
+    border: 1px solid {toolbar_group_border};
+    border-radius: {toolbar_group_radius}px;
+}}
+#toolbarSpinGroup QLabel {{
+    background-color: transparent;
+}}
+QSpinBox#toolbarInlineSpin {{
+    background-color: {control_bg};
+    color: {bright_text};
+    border: none;
+    margin-right: {toolbar_spin_margin_right}px;
+    padding: 2px {toolbar_spin_value_padding_x}px;
 }}
 """
 APP_STYLE = APP_STYLE_TEMPLATE.format(
@@ -132,6 +301,16 @@ APP_STYLE = APP_STYLE_TEMPLATE.format(
     control_border=CONTROL_BORDER_HEX,
     control_hover=CONTROL_HOVER_HEX,
     control_pressed=CONTROL_PRESSED_HEX,
+    control_padding_x=CONTROL_PADDING_X,
+    control_padding_y=CONTROL_PADDING_Y,
+    toolbar_group_border=TOOLBAR_GROUP_BORDER_HEX,
+    toolbar_group_radius=TOOLBAR_GROUP_BORDER_RADIUS,
+    toolbar_spin_margin_right=TOOLBAR_SPIN_MARGIN_RIGHT,
+    toolbar_spin_value_padding_x=TOOLBAR_SPIN_VALUE_PADDING_X,
+    toolbar_scroll_bg=TOOLBAR_SCROLL_BG_HEX,
+    toolbar_scroll_handle=TOOLBAR_SCROLL_HANDLE_HEX,
+    toolbar_scroll_handle_hover=TOOLBAR_SCROLL_HANDLE_HOVER_HEX,
+    toolbar_scrollbar_height=TOOLBAR_SCROLLBAR_HEIGHT,
     splitter_handle=SPLITTER_HANDLE_HEX,
     splitter_handle_width=SPLITTER_HANDLE_WIDTH,
     slider_groove_width=SLIDER_GROOVE_WIDTH,
@@ -147,10 +326,31 @@ WAVE_GRID_COLOR = hex_color(WAVE_GRID_HEX) # 示波器格線顏色
 WAVE_LINE_COLOR = hex_color(WAVE_LINE_HEX) # 示波器波型顏色
 WAVE_CURSOR_COLOR = hex_color(WAVE_CURSOR_HEX) # 示波器掃描游標顏色
 WAVE_THRESHOLD_COLOR = hex_color(WAVE_THRESHOLD_HEX) # 示波器 threshold 線顏色
+RPM_VALUE_COLOR = hex_color(RPM_VALUE_HEX) # RPM 數值顏色
 ROI_PAUSED_COLOR = hex_color(ROI_PAUSED_HEX) # 暫停編輯時的 ROI 顏色
 ROI_PLAYING_COLOR = hex_color(ROI_PLAYING_HEX) # 播放追蹤時的 ROI 顏色
 ROI_PREVIEW_COLOR = hex_color(ROI_PREVIEW_HEX) # 新增 ROI 時的預覽顏色
 TRACKING_LINE_COLOR = hex_color(TRACKING_LINE_HEX) # 中心位移線顏色
+ICON_BUTTON_SIZE = 32 # 純圖示按鈕固定大小
+BUTTON_ICON_SIZE = 20 # 按鈕內圖示大小
+
+
+# 保留原生勾勾，只補強 checkbox 外框
+class BorderCheckBox(QCheckBox):
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        indicator = self.style().subElementRect(
+            QStyle.SubElement.SE_CheckBoxIndicator,
+            option,
+            self,
+        )
+        painter = QPainter(self)
+        painter.setPen(QPen(hex_color(CHECKBOX_BORDER_HEX), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(indicator.adjusted(0, 0, -1, -1))
 
 
 # 影片顯示與 ROI 編輯區
@@ -179,8 +379,8 @@ class VideoWidget(QWidget):
         self.drag_action: str | None = None
         self.drag_handle: str | None = None
         self.original_roi: tuple[int, int, int, int] | None = None
-        self.source_label = "No source"
-        self.motion_value = 0.0
+        self.status_text = "No source|Enhance: None|FPS: 0|Motion: 0.00"
+        self.max_zoom_scale = DEFAULT_MAX_ZOOM_SCALE
 
     # 更新目前顯示的影像
     def set_frame(self, image: QImage, frame_size: tuple[int, int]) -> None:
@@ -202,21 +402,30 @@ class VideoWidget(QWidget):
         self.pan_y = 0.0
         self.update()
 
+    # 更新滾輪縮放最大倍率
+    def set_max_zoom_scale(self, value: float) -> None:
+        self.max_zoom_scale = max(1.0, value)
+        self.zoom_scale = max(1 / self.max_zoom_scale, min(self.zoom_scale, self.max_zoom_scale))
+        self.update()
+
     # 更新 ROI 顯示
     def set_roi(self, roi: tuple[int, int, int, int] | None) -> None:
         self.roi = roi
         self.update()
 
     # 更新參考中心和目前追蹤中心
-    def set_tracking_centers(self, reference_center: tuple[float, float] | None, current_center: tuple[float, float] | None) -> None:
+    def set_tracking_centers(
+        self,
+        reference_center: tuple[float, float] | None,
+        current_center: tuple[float, float] | None,
+    ) -> None:
         self.reference_center = reference_center
         self.current_center = current_center
         self.update()
 
     # 更新狀態文字
-    def set_status(self, source_label: str, motion_value: float) -> None:
-        self.source_label = source_label
-        self.motion_value = motion_value
+    def set_status(self, text: str) -> None:
+        self.status_text = text
         self.update()
 
     # 啟用或停用 ROI 編輯
@@ -239,7 +448,7 @@ class VideoWidget(QWidget):
         painter.drawImage(self.image_rect, self.image)
 
         painter.setPen(QPen(QColor("white"), 2))
-        painter.drawText(16, 28, f"{self.source_label} | motion {self.motion_value:.2f}")
+        painter.drawText(16, 28, self.status_text)
 
         if self.roi is not None:
             roi_color = ROI_PAUSED_COLOR if self.editing_enabled else ROI_PLAYING_COLOR
@@ -345,9 +554,9 @@ class VideoWidget(QWidget):
 
         old_scale = self.zoom_scale
         if event.angleDelta().y() > 0:
-            self.zoom_scale = min(self.zoom_scale * 1.1, 8.0)
+            self.zoom_scale = min(self.zoom_scale * 1.1, self.max_zoom_scale)
         else:
-            self.zoom_scale = max(self.zoom_scale / 1.1, 0.25)
+            self.zoom_scale = max(self.zoom_scale / 1.1, 1 / self.max_zoom_scale)
 
         if self.zoom_scale == old_scale:
             return
@@ -358,7 +567,12 @@ class VideoWidget(QWidget):
         self.update()
 
     # 調整 pan，讓縮放後滑鼠下的影像點維持不動
-    def _anchor_zoom_to_point(self, frame_point: tuple[int, int], cursor_x: float, cursor_y: float) -> None:
+    def _anchor_zoom_to_point(
+        self,
+        frame_point: tuple[int, int],
+        cursor_x: float,
+        cursor_y: float,
+    ) -> None:
         if self.frame_size is None:
             return
 
@@ -370,8 +584,16 @@ class VideoWidget(QWidget):
         draw_height = max(1, int(frame_height * base_scale * self.zoom_scale))
         base_left = (widget_width - draw_width) // 2
         base_top = (widget_height - draw_height) // 2
-        self.pan_x = cursor_x - base_left - frame_point[0] * draw_width / frame_width
-        self.pan_y = cursor_y - base_top - frame_point[1] * draw_height / frame_height
+        self.pan_x = (
+            cursor_x
+            - base_left
+            - frame_point[0] * draw_width / frame_width
+        )
+        self.pan_y = (
+            cursor_y
+            - base_top
+            - frame_point[1] * draw_height / frame_height
+        )
 
     # 讓影像依視窗大小等比例縮放
     def _fit_rect(self, image_width: int, image_height: int) -> QRect:
@@ -401,7 +623,11 @@ class VideoWidget(QWidget):
         return frame_x, frame_y
 
     # 將兩點轉成 ROI tuple
-    def _points_to_roi(self, start: tuple[int, int], end: tuple[int, int] | None) -> tuple[int, int, int, int] | None:
+    def _points_to_roi(
+        self,
+        start: tuple[int, int],
+        end: tuple[int, int] | None,
+    ) -> tuple[int, int, int, int] | None:
         if end is None:
             return None
 
@@ -415,7 +641,12 @@ class VideoWidget(QWidget):
 
     # 依照拖曳中的 handle 移動或縮放 ROI
     def _transform_roi(self, current: tuple[int, int] | None) -> tuple[int, int, int, int] | None:
-        if current is None or self.original_roi is None or self.drag_start is None or self.drag_handle is None:
+        if (
+            current is None
+            or self.original_roi is None
+            or self.drag_start is None
+            or self.drag_handle is None
+        ):
             return self.roi
 
         x, y, width, height = self.original_roi
@@ -427,7 +658,12 @@ class VideoWidget(QWidget):
         if self.drag_handle == "move":
             delta_x = current[0] - self.drag_start[0]
             delta_y = current[1] - self.drag_start[1]
-            return self._clamp_roi(left + delta_x, top + delta_y, right + delta_x, bottom + delta_y)
+            return self._clamp_roi(
+                left + delta_x,
+                top + delta_y,
+                right + delta_x,
+                bottom + delta_y,
+            )
 
         if "w" in self.drag_handle:
             left = current[0]
@@ -441,7 +677,13 @@ class VideoWidget(QWidget):
         return self._clamp_roi(left, top, right, bottom)
 
     # 將 ROI 限制在影像範圍內
-    def _clamp_roi(self, left: int, top: int, right: int, bottom: int) -> tuple[int, int, int, int] | None:
+    def _clamp_roi(
+        self,
+        left: int,
+        top: int,
+        right: int,
+        bottom: int,
+    ) -> tuple[int, int, int, int] | None:
         if self.frame_size is None:
             return None
 
@@ -455,7 +697,12 @@ class VideoWidget(QWidget):
         return left, top, right - left, bottom - top
 
     # 在影片上畫 ROI
-    def _draw_roi(self, painter: QPainter, roi: tuple[int, int, int, int], color: QColor) -> None:
+    def _draw_roi(
+        self,
+        painter: QPainter,
+        roi: tuple[int, int, int, int],
+        color: QColor,
+    ) -> None:
         if self.frame_size is None:
             return
 
@@ -514,7 +761,10 @@ class VideoWidget(QWidget):
         return None
 
     # 取得 ROI 的畫面座標
-    def _roi_to_canvas_box(self, roi: tuple[int, int, int, int]) -> tuple[float, float, float, float] | None:
+    def _roi_to_canvas_box(
+        self,
+        roi: tuple[int, int, int, int],
+    ) -> tuple[float, float, float, float] | None:
         if self.frame_size is None:
             return None
 
@@ -562,12 +812,13 @@ class VideoWidget(QWidget):
 class WaveformWidget(QWidget):
     def __init__(self) -> None:
         super().__init__()
-        self.setMinimumHeight(80)
+        self.setMinimumHeight(0)
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.values: list[float | None] = []
         self.cursor_index = 0
         self.threshold_percent = 50
+        self.max_value = 100.0
 
     # 更新波型資料
     def set_values(self, values: list[float | None], cursor_index: int = 0) -> None:
@@ -580,31 +831,42 @@ class WaveformWidget(QWidget):
         self.threshold_percent = max(0, min(threshold_percent, 100))
         self.update()
 
+    # 更新示波器最大位移值
+    def set_max_value(self, max_value: float) -> None:
+        self.max_value = max(0.0, max_value)
+        self.update()
+
     # 繪製波型
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), PANEL_BG)
-        painter.setPen(QPen(QColor("white"), 2))
-        painter.drawText(16, 28, "ROI motion waveform")
 
-        graph_left = 16
-        graph_right_padding = 16 + WAVE_Y_AXIS_LABEL_WIDTH
-        graph = QRect(graph_left, 45, max(1, self.width() - graph_left - graph_right_padding), max(1, self.height() - 63))
+        title_visible = self.height() >= WAVE_TITLE_MIN_VISIBLE_HEIGHT
+        graph_left = WAVE_GRAPH_MARGIN_X
+        graph_right_padding = WAVE_GRAPH_MARGIN_X + WAVE_Y_AXIS_LABEL_WIDTH
+        graph_bottom_padding = (
+            WAVE_GRAPH_MARGIN_BOTTOM
+            + (WAVE_TITLE_HEIGHT if title_visible else 0)
+        )
+        graph = QRect(
+            graph_left,
+            WAVE_GRAPH_MARGIN_TOP,
+            max(1, self.width() - graph_left - graph_right_padding),
+            max(1, self.height() - WAVE_GRAPH_MARGIN_TOP - graph_bottom_padding),
+        )
         self._draw_y_axis_labels(painter, graph)
         painter.setPen(QPen(WAVE_GRID_COLOR, 1))
         painter.drawRect(graph)
 
         valid_values = [value for value in self.values if value is not None]
         if len(valid_values) < 2:
-            middle = graph.top() + graph.height() // 2
-            painter.drawLine(graph.left(), middle, graph.right(), middle)
+            painter.drawLine(graph.left(), graph.bottom(), graph.right(), graph.bottom())
             self._draw_threshold(painter, graph)
             self._draw_cursor(painter, graph)
+            self._draw_title(painter, title_visible)
             return
 
-        minimum = min(valid_values)
-        maximum = max(valid_values)
-        span = maximum - minimum if maximum > minimum else 1.0
+        span = max(0.01, self.max_value)
         self._draw_threshold(painter, graph)
 
         painter.setPen(QPen(WAVE_LINE_COLOR, 2))
@@ -615,7 +877,7 @@ class WaveformWidget(QWidget):
                 continue
 
             x_ratio = index / max(1, len(self.values) - 1)
-            y_ratio = (value - minimum) / span
+            y_ratio = max(0.0, min(value / span, 1.0))
             x = graph.left() + x_ratio * graph.width()
             y = graph.bottom() - y_ratio * graph.height()
             current = (int(x), int(y))
@@ -624,6 +886,19 @@ class WaveformWidget(QWidget):
             previous = current
 
         self._draw_cursor(painter, graph)
+        self._draw_title(painter, title_visible)
+
+    # 標題放在下方，高度不足時先犧牲
+    def _draw_title(self, painter: QPainter, visible: bool) -> None:
+        if not visible:
+            return
+
+        font = painter.font()
+        font.setPointSize(PANEL_TITLE_FONT_SIZE)
+        painter.setFont(font)
+        painter.setPen(QPen(QColor("white"), 2))
+        title_y = max(WAVE_GRAPH_MARGIN_TOP, self.height() - WAVE_GRAPH_MARGIN_BOTTOM)
+        painter.drawText(WAVE_GRAPH_MARGIN_X, title_y, "ROI motion waveform")
 
     # 畫出 threshold 水平線
     def _draw_threshold(self, painter: QPainter, graph: QRect) -> None:
@@ -639,9 +914,10 @@ class WaveformWidget(QWidget):
         font = painter.font()
         font.setPointSize(WAVE_Y_AXIS_LABEL_FONT_SIZE)
         painter.setFont(font)
+        half_value = self.max_value / 2
         labels = [
-            ("100", graph.top() + 4),
-            ("50", graph.center().y() + 4),
+            (f"{self.max_value:.2f}", graph.top() + 4),
+            (f"{half_value:.2f}", graph.center().y() + 4),
             ("0", graph.bottom()),
         ]
         label_x = graph.right() + 4
@@ -660,57 +936,250 @@ class WaveformWidget(QWidget):
         painter.drawLine(x, graph.top(), x, graph.bottom())
 
 
+# RPM 顯示區
+class RpmWidget(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setMinimumHeight(0)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.rpm: float | None = None
+
+    # 更新 RPM 顯示
+    def set_rpm(self, rpm: float | None) -> None:
+        self.rpm = rpm
+        self.update()
+
+    # 繪製 RPM 卡片與標題
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), PANEL_BG)
+
+        title_visible = self.height() >= WAVE_TITLE_MIN_VISIBLE_HEIGHT
+        content_rect = QRect(
+            WAVE_GRAPH_MARGIN_X,
+            WAVE_GRAPH_MARGIN_TOP,
+            max(1, self.width() - (2 * WAVE_GRAPH_MARGIN_X)),
+            max(
+                1,
+                self.height()
+                - WAVE_GRAPH_MARGIN_TOP
+                - WAVE_GRAPH_MARGIN_BOTTOM
+                - (WAVE_TITLE_HEIGHT if title_visible else 0),
+            ),
+        )
+
+        painter.setPen(QPen(QColor(CARD_BORDER_HEX), 1))
+        painter.drawRoundedRect(content_rect, 8, 8)
+
+        value = "--" if self.rpm is None else f"{self.rpm:.0f}"
+
+        value_font = painter.font()
+        value_font.setPointSize(RPM_VALUE_FONT_SIZE)
+        value_font.setBold(True)
+        painter.setFont(value_font)
+        painter.setPen(QPen(RPM_VALUE_COLOR, 1))
+        painter.drawText(content_rect, Qt.AlignmentFlag.AlignCenter, value)
+
+        self._draw_title(painter, title_visible)
+
+    # 標題放在下方，高度不足時先犧牲
+    def _draw_title(self, painter: QPainter, visible: bool) -> None:
+        if not visible:
+            return
+
+        font = painter.font()
+        font.setPointSize(RESPIRATION_FONT_SIZE)
+        painter.setFont(font)
+        painter.setPen(QPen(QColor("white"), 2))
+        title_y = max(WAVE_GRAPH_MARGIN_TOP, self.height() - WAVE_GRAPH_MARGIN_BOTTOM)
+        painter.drawText(WAVE_GRAPH_MARGIN_X, title_y, RESPIRATION_TEXT)
+
+
 # 主視窗 layout
 class MonitorWindow(QMainWindow):
-    def __init__(self, camera_indexes: tuple[int, ...]) -> None:
+    def __init__(self, camera_indexes: tuple[int, ...], app_title: str) -> None:
         super().__init__()
-        self.setWindowTitle(APP_TITLE)
+        self.setWindowTitle(app_title)
+        self.setWindowIcon(QIcon(str(ASSET_DIR / "logo.svg")))
         self.setStyleSheet(APP_STYLE)
         self.resize(*DEFAULT_APP_SIZE)
+        set_windows_title_bar_color(self)
         self._build_layout(camera_indexes)
 
     # 建立 GUI 版面
     def _build_layout(self, camera_indexes: tuple[int, ...]) -> None:
         root = QWidget()
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(
+            APP_CONTENT_MARGIN_X,
+            APP_CONTENT_MARGIN_Y,
+            APP_CONTENT_MARGIN_X,
+            APP_CONTENT_MARGIN_Y,
+        )
+        layout.setSpacing(APP_CONTENT_SPACING)
 
-        toolbar_widget = QWidget()
-        toolbar_widget.setMinimumWidth(0)
-        toolbar_widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        toolbar = QHBoxLayout(toolbar_widget)
+        self.toolbar_content = QFrame()
+        self.toolbar_content.setObjectName("toolbarContent")
+        self.toolbar_content.setFrameShape(QFrame.Shape.NoFrame)
+        self.toolbar_content.setLineWidth(0)
+        self.toolbar_content.setMidLineWidth(0)
+        self.toolbar_content.setContentsMargins(0, 0, 0, 0)
+        self.toolbar_content.setFixedWidth(TOOLBAR_GROUP_WIDTH)
+        self.toolbar_content.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        toolbar = QHBoxLayout(self.toolbar_content)
         toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(TOOLBAR_ITEM_SPACING)
         self.load_mode_menu = QComboBox()
         self.load_mode_menu.addItems(["Camera", "Video"])
         self.open_video_button = QPushButton("Open Video")
-        self.camera_label = QLabel("Camera")
+        self.open_video_button.setIcon(QIcon(str(ASSET_DIR / "file.svg")))
+        self.open_video_button.setIconSize(QSize(BUTTON_ICON_SIZE, BUTTON_ICON_SIZE))
+        self.open_video_button.setText("")
+        self.open_video_button.setToolTip("Open Video")
         self.camera_menu = QComboBox()
-        self.camera_menu.addItems([str(index) for index in camera_indexes])
+        for index in camera_indexes:
+            self.camera_menu.addItem(f"Cam {index}", str(index))
         self.scan_camera_button = QPushButton("Scan Cameras")
+        self.scan_camera_button.setIcon(QIcon(str(ASSET_DIR / "scancam.svg")))
+        self.scan_camera_button.setIconSize(QSize(BUTTON_ICON_SIZE, BUTTON_ICON_SIZE))
+        self.scan_camera_button.setText("")
+        self.scan_camera_button.setToolTip("Scan Cameras")
+        self.enhancement_menu = QComboBox()
+        self.enhancement_menu.addItem("Enhance: None", "None")
+        for mode in [
+            "Gray Blur",
+            "CLAHE Gray",
+            "Sobel Edge",
+            "Laplacian Edge",
+            "Motion Edge",
+        ]:
+            self.enhancement_menu.addItem(mode, mode)
+        self.show_raw_check = BorderCheckBox("Show RAW")
+        self.show_raw_check.setChecked(False)
         self.play_button = QPushButton("Play")
+        self.play_icon = QIcon(str(ASSET_DIR / "play.svg"))
+        self.pause_icon = QIcon(str(ASSET_DIR / "pause.svg"))
+        self.play_button.setIcon(self.play_icon)
+        self.play_button.setIconSize(QSize(BUTTON_ICON_SIZE, BUTTON_ICON_SIZE))
+        self.play_button.setText("")
+        self.play_button.setToolTip("Play")
         self.clear_roi_button = QPushButton("Clear ROI")
-        self.reset_layout_button = QPushButton("Reset Layout")
-        self.status_label = QLabel("Open a video or camera to begin.")
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.status_label.setMinimumWidth(0)
-        self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.reset_button = QPushButton("Reset")
+        self.detect_rate_label = QLabel("Detect rate")
+        self.detect_rate_spin = QSpinBox()
+        self.detect_rate_spin.setRange(1, 999)
+        self.detect_rate_spin.setSingleStep(1)
+        self.detect_rate_spin.setValue(60)
+        self.detect_rate_spin.setObjectName("toolbarInlineSpin")
+        self.detect_rate_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.detect_rate_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.beep_label = QLabel("Sound freq.")
+        self.beep_frequency_spin = QSpinBox()
+        self.beep_frequency_spin.setRange(100, 4000)
+        self.beep_frequency_spin.setSingleStep(1)
+        self.beep_frequency_spin.setValue(479)
+        self.beep_frequency_spin.setObjectName("toolbarInlineSpin")
+        self.beep_frequency_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.beep_frequency_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.mute_button = BorderCheckBox("Mute")
+        self.mute_button.setChecked(False)
+        self.topmost_check = BorderCheckBox("Topmost")
+        self.topmost_check.setChecked(True)
 
-        toolbar.addWidget(QLabel("Load Mode"))
-        toolbar.addWidget(self.load_mode_menu)
+        self.load_mode_menu.setMinimumWidth(LOAD_MODE_MENU_WIDTH)
+        self.load_mode_menu.setFixedHeight(CONTROL_WIDGET_HEIGHT)
+        self.load_mode_menu.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.open_video_button.setFixedSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE)
+        self.camera_menu.setMinimumWidth(CAMERA_MENU_WIDTH)
+        self.camera_menu.setFixedHeight(CONTROL_WIDGET_HEIGHT)
+        self.camera_menu.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.scan_camera_button.setFixedSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE)
+        self.enhancement_menu.setMinimumWidth(ENHANCEMENT_MENU_WIDTH)
+        self.enhancement_menu.setFixedHeight(CONTROL_WIDGET_HEIGHT)
+        self.enhancement_menu.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.show_raw_check.setMinimumWidth(SHOW_RAW_CHECK_WIDTH)
+        self.show_raw_check.setFixedHeight(CONTROL_WIDGET_HEIGHT)
+        self.play_button.setFixedSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE)
+        self.clear_roi_button.setMinimumWidth(CLEAR_ROI_BUTTON_WIDTH)
+        self.clear_roi_button.setFixedHeight(CONTROL_WIDGET_HEIGHT)
+        self.reset_button.setMinimumWidth(RESET_BUTTON_WIDTH)
+        self.reset_button.setFixedHeight(CONTROL_WIDGET_HEIGHT)
+        self.detect_rate_label.setFixedWidth(DETECT_RATE_LABEL_WIDTH)
+        self.detect_rate_label.setFixedHeight(TOOLBAR_GROUP_SPIN_HEIGHT)
+        self.detect_rate_spin.setMinimumWidth(DETECT_RATE_SPIN_WIDTH)
+        self.detect_rate_spin.setFixedHeight(TOOLBAR_GROUP_SPIN_HEIGHT)
+        self.detect_rate_spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.beep_label.setFixedWidth(BEEP_LABEL_WIDTH)
+        self.beep_label.setFixedHeight(TOOLBAR_GROUP_SPIN_HEIGHT)
+        self.beep_frequency_spin.setMinimumWidth(BEEP_FREQ_SPIN_WIDTH)
+        self.beep_frequency_spin.setFixedHeight(TOOLBAR_GROUP_SPIN_HEIGHT)
+        self.beep_frequency_spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.mute_button.setMinimumWidth(MUTE_BUTTON_WIDTH)
+        self.mute_button.setFixedHeight(CONTROL_WIDGET_HEIGHT)
+        self.topmost_check.setMinimumWidth(TOPMOST_CHECK_WIDTH)
+        self.topmost_check.setFixedHeight(CONTROL_WIDGET_HEIGHT)
+
+        # toolbar 小群組：群組內零間距，群組之間使用 toolbar 固定間距
+        def make_toolbar_pair(label: QLabel, widget: QWidget, width: int) -> QFrame:
+            pair = QFrame()
+            pair.setObjectName("toolbarSpinGroup")
+            pair.setFrameShape(QFrame.Shape.NoFrame)
+            pair.setContentsMargins(0, 0, 0, 0)
+            pair.setFixedHeight(CONTROL_WIDGET_HEIGHT)
+            pair.setMinimumWidth(width)
+            pair.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            pair_layout = QHBoxLayout(pair)
+            pair_layout.setContentsMargins(
+                TOOLBAR_GROUP_PADDING_X,
+                TOOLBAR_GROUP_PADDING_Y,
+                TOOLBAR_GROUP_PADDING_X,
+                TOOLBAR_GROUP_PADDING_Y,
+            )
+            pair_layout.setSpacing(TOOLBAR_GROUP_SPACING)
+            pair_layout.addWidget(label)
+            pair_layout.addWidget(widget, 1)
+            return pair
+
+        self.detect_rate_group = make_toolbar_pair(
+            self.detect_rate_label,
+            self.detect_rate_spin,
+            DETECT_RATE_GROUP_WIDTH,
+        )
+        self.beep_group = make_toolbar_pair(
+            self.beep_label,
+            self.beep_frequency_spin,
+            SOUND_FREQ_GROUP_WIDTH,
+        )
+
+        toolbar.addWidget(self.load_mode_menu, TOOLBAR_MENU_STRETCH)
+        toolbar.addWidget(self.camera_menu, TOOLBAR_MENU_STRETCH)
         toolbar.addWidget(self.open_video_button)
-        toolbar.addWidget(self.camera_label)
-        toolbar.addWidget(self.camera_menu)
         toolbar.addWidget(self.scan_camera_button)
         toolbar.addWidget(self.play_button)
         toolbar.addWidget(self.clear_roi_button)
-        toolbar.addWidget(self.reset_layout_button)
-        toolbar.addStretch(1)
-        toolbar.addWidget(self.status_label, 1)
+        toolbar.addWidget(self.enhancement_menu, TOOLBAR_ENHANCE_STRETCH)
+        toolbar.addWidget(self.show_raw_check)
+        toolbar.addWidget(self.detect_rate_group, TOOLBAR_SPIN_GROUP_STRETCH)
+        toolbar.addWidget(self.beep_group, TOOLBAR_SPIN_GROUP_STRETCH)
+        toolbar.addWidget(self.mute_button)
+        toolbar.addWidget(self.topmost_check)
+        toolbar.addWidget(self.reset_button)
+
+        self.toolbar_content.adjustSize()
+        self.toolbar_content.setFixedHeight(self.toolbar_content.sizeHint().height())
 
         self.toolbar_scroll = QScrollArea()
-        self.toolbar_scroll.setWidget(toolbar_widget)
-        self.toolbar_scroll.setWidgetResizable(True)
+        self.toolbar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.toolbar_scroll.setLineWidth(0)
+        self.toolbar_scroll.setMidLineWidth(0)
+        self.toolbar_scroll.setContentsMargins(0, 0, 0, 0)
+        self.toolbar_scroll.setViewportMargins(0, 0, 0, 0)
+        self.toolbar_scroll.setWidget(self.toolbar_content)
+        self.toolbar_scroll.setWidgetResizable(False)
         self.toolbar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.toolbar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.toolbar_scroll.setMinimumWidth(0)
@@ -718,57 +1187,56 @@ class MonitorWindow(QMainWindow):
 
         self.waveform = WaveformWidget()
         self.waveform.setObjectName("waveformPanel")
-        self.rpm_panel = QWidget()
+        self.rpm_panel = RpmWidget()
         self.rpm_panel.setObjectName("rpmPanel")
-        self.rpm_panel.setMinimumWidth(0)
-        self.rpm_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        rpm_layout = QVBoxLayout(self.rpm_panel)
-        rpm_layout.setContentsMargins(10, 10, 10, 10)
-        rpm_layout.setSpacing(8)
-        self.rpm_value_panel = QFrame()
-        self.rpm_value_panel.setObjectName("rpmValuePanel")
-        self.rpm_value_panel.setMinimumWidth(0)
-        self.rpm_value_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        rpm_value_layout = QVBoxLayout(self.rpm_value_panel)
-        rpm_value_layout.setContentsMargins(8, 8, 8, 8)
-        self.rpm_value_label = QLabel("--")
-        self.rpm_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.rpm_value_label.setTextFormat(Qt.TextFormat.RichText)
-        self.rpm_value_label.setMinimumWidth(0)
-        self.rpm_value_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-        rpm_value_layout.addWidget(self.rpm_value_label)
-        self.respiration_panel = QFrame()
-        self.respiration_panel.setObjectName("respirationPanel")
-        self.respiration_panel.setMinimumHeight(RESPIRATION_PANEL_MIN_HEIGHT)
-        self.respiration_panel.setMinimumWidth(0)
-        self.respiration_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        respiration_layout = QVBoxLayout(self.respiration_panel)
-        respiration_layout.setContentsMargins(8, 4, 8, 4)
-        self.respiration_label = QLabel(RESPIRATION_TEXT)
-        self.respiration_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.respiration_label.setStyleSheet(f"font-size: {RESPIRATION_FONT_SIZE}px;")
-        self.respiration_label.setMinimumWidth(0)
-        self.respiration_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-        respiration_layout.addWidget(self.respiration_label)
-        rpm_layout.addWidget(self.rpm_value_panel, 3)
-        rpm_layout.addWidget(self.respiration_panel, 1)
 
         self.control_panel = QWidget()
         self.control_panel.setObjectName("controlPanel")
         self.control_panel.setMinimumWidth(0)
         self.control_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        control_layout = QVBoxLayout(self.control_panel)
+        control_layout = QGridLayout(self.control_panel)
         control_layout.setContentsMargins(8, PANEL_PADDING_Y, 8, PANEL_PADDING_Y)
         control_layout.setSpacing(8)
+        self.smooth_panel = QFrame()
+        self.smooth_panel.setObjectName("smoothPanel")
+        self.smooth_panel.setMinimumWidth(0)
+        self.smooth_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        smooth_layout = QVBoxLayout(self.smooth_panel)
+        smooth_layout.setContentsMargins(
+            THRESHOLD_PANEL_MARGIN_X,
+            THRESHOLD_PANEL_MARGIN_Y,
+            THRESHOLD_PANEL_MARGIN_X,
+            THRESHOLD_PANEL_MARGIN_Y,
+        )
+        smooth_layout.setSpacing(8)
+        self.smooth_title_label = QLabel(SMOOTH_TEXT)
+        self.smooth_title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.smooth_title_label.setMinimumHeight(THRESHOLD_LABEL_MIN_HEIGHT)
+        self.smooth_title_label.setMinimumWidth(0)
+        self.smooth_title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.smooth_slider = QSlider(Qt.Orientation.Vertical)
+        self.smooth_slider.setObjectName("smoothSlider")
+        self.smooth_slider.setInvertedAppearance(False)
+        self.smooth_slider.setMinimumWidth(0)
+        self.smooth_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        smooth_layout.addWidget(self.smooth_title_label)
+        smooth_layout.addWidget(self.smooth_slider, 1)
+        control_layout.addWidget(self.smooth_panel, 1, 0)
         self.threshold_panel = QFrame()
         self.threshold_panel.setObjectName("thresholdPanel")
         self.threshold_panel.setMinimumWidth(0)
         self.threshold_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         threshold_layout = QVBoxLayout(self.threshold_panel)
-        threshold_layout.setContentsMargins(10, 10, 10, 10)
+        threshold_layout.setContentsMargins(
+            THRESHOLD_PANEL_MARGIN_X,
+            THRESHOLD_PANEL_MARGIN_Y,
+            THRESHOLD_PANEL_MARGIN_X,
+            THRESHOLD_PANEL_MARGIN_Y,
+        )
         threshold_layout.setSpacing(8)
         self.threshold_title_label = QLabel(THRESHOLD_TEXT)
         self.threshold_title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.threshold_title_label.setMinimumHeight(THRESHOLD_LABEL_MIN_HEIGHT)
         self.threshold_title_label.setMinimumWidth(0)
         self.threshold_title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.threshold_slider = QSlider(Qt.Orientation.Vertical)
@@ -778,7 +1246,61 @@ class MonitorWindow(QMainWindow):
         self.threshold_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         threshold_layout.addWidget(self.threshold_title_label)
         threshold_layout.addWidget(self.threshold_slider, 1)
-        control_layout.addWidget(self.threshold_panel, 1)
+        control_layout.addWidget(self.threshold_panel, 0, 1)
+        self.gain_panel = QFrame()
+        self.gain_panel.setObjectName("gainPanel")
+        self.gain_panel.setMinimumWidth(0)
+        self.gain_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        gain_layout = QVBoxLayout(self.gain_panel)
+        gain_layout.setContentsMargins(
+            THRESHOLD_PANEL_MARGIN_X,
+            THRESHOLD_PANEL_MARGIN_Y,
+            THRESHOLD_PANEL_MARGIN_X,
+            THRESHOLD_PANEL_MARGIN_Y,
+        )
+        gain_layout.setSpacing(8)
+        self.gain_title_label = QLabel(GAIN_TEXT)
+        self.gain_title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.gain_title_label.setMinimumHeight(THRESHOLD_LABEL_MIN_HEIGHT)
+        self.gain_title_label.setMinimumWidth(0)
+        self.gain_title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.gain_slider = QSlider(Qt.Orientation.Vertical)
+        self.gain_slider.setObjectName("gainSlider")
+        self.gain_slider.setInvertedAppearance(False)
+        self.gain_slider.setMinimumWidth(0)
+        self.gain_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        gain_layout.addWidget(self.gain_title_label)
+        gain_layout.addWidget(self.gain_slider, 1)
+        control_layout.addWidget(self.gain_panel, 0, 0)
+        self.sens_panel = QFrame()
+        self.sens_panel.setObjectName("sensPanel")
+        self.sens_panel.setMinimumWidth(0)
+        self.sens_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        sens_layout = QVBoxLayout(self.sens_panel)
+        sens_layout.setContentsMargins(
+            THRESHOLD_PANEL_MARGIN_X,
+            THRESHOLD_PANEL_MARGIN_Y,
+            THRESHOLD_PANEL_MARGIN_X,
+            THRESHOLD_PANEL_MARGIN_Y,
+        )
+        sens_layout.setSpacing(8)
+        self.sens_title_label = QLabel(SENS_TEXT)
+        self.sens_title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.sens_title_label.setMinimumHeight(THRESHOLD_LABEL_MIN_HEIGHT)
+        self.sens_title_label.setMinimumWidth(0)
+        self.sens_title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.sens_slider = QSlider(Qt.Orientation.Vertical)
+        self.sens_slider.setObjectName("sensSlider")
+        self.sens_slider.setInvertedAppearance(False)
+        self.sens_slider.setMinimumWidth(0)
+        self.sens_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        sens_layout.addWidget(self.sens_title_label)
+        sens_layout.addWidget(self.sens_slider, 1)
+        control_layout.addWidget(self.sens_panel, 1, 1)
+        control_layout.setRowStretch(0, 1)
+        control_layout.setRowStretch(1, 1)
+        control_layout.setColumnStretch(0, 1)
+        control_layout.setColumnStretch(1, 1)
 
         self.video = VideoWidget()
         self.video.setObjectName("videoPanel")
@@ -803,48 +1325,90 @@ class MonitorWindow(QMainWindow):
         layout.addWidget(self.toolbar_scroll)
         layout.addWidget(self.content_splitter, 1)
         self.setCentralWidget(root)
+
+        self.status_label = QLabel("Open a video or camera to begin. Wheel to zoom, middle-drag to pan.")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.status_label.setMinimumWidth(0)
+        self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.status_bar = QStatusBar()
+        self.status_bar.setSizeGripEnabled(False)
+        self.status_bar.setContentsMargins(0, 0, 0, 0)
+        self.status_bar.setMinimumHeight(0)
+        self.status_bar.setMaximumHeight(STATUS_BAR_MAX_HEIGHT)
+        self.status_bar.addWidget(self.status_label, 1)
+        self.setStatusBar(self.status_bar)
+
         self.set_load_mode("Camera")
         self.set_rpm(None)
 
     # 更新 camera 下拉選單
     def set_camera_indexes(self, indexes: list[str]) -> None:
         self.camera_menu.clear()
-        self.camera_menu.addItems(indexes)
+        for index in indexes:
+            self.camera_menu.addItem(f"Cam {index}", index)
 
     # 切換載入模式顯示的控制項
     def set_load_mode(self, mode: str) -> None:
         is_camera_mode = mode == "Camera"
         self.open_video_button.setVisible(not is_camera_mode)
-        self.camera_label.setVisible(is_camera_mode)
         self.camera_menu.setVisible(is_camera_mode)
         self.scan_camera_button.setVisible(is_camera_mode)
 
-    # 更新播放按鈕文字
+    # 更新播放按鈕圖示
     def set_playing(self, playing: bool) -> None:
-        self.play_button.setText("Pause" if playing else "Play")
+        self.play_button.setIcon(self.pause_icon if playing else self.play_icon)
+        self.play_button.setToolTip("Pause" if playing else "Play")
         self.video.set_roi_editing(not playing)
 
     # 更新狀態列
     def set_status(self, text: str) -> None:
         self.status_label.setText(text)
 
+    # 更新靜音按鈕狀態
+    def set_muted(self, muted: bool) -> None:
+        self.mute_button.setChecked(muted)
+
     # 更新 RPM 顯示
     def set_rpm(self, rpm: float | None) -> None:
-        value = "--" if rpm is None else f"{rpm:.0f}"
-        self.rpm_value_label.setText(
-            f"<span style='font-size:{RPM_VALUE_FONT_SIZE}px; font-weight:700;'>{value}</span>"
-            f"<span style='font-size:{RPM_UNIT_FONT_SIZE}px;'> {RPM_TEXT}</span>"
-        )
+        self.rpm_panel.set_rpm(rpm)
 
     # 設定 threshold 拉桿範圍
     def set_threshold_range(self, minimum: int, maximum: int, value: int) -> None:
         self.threshold_slider.setRange(minimum, maximum)
         self.threshold_slider.setValue(value)
-        self.waveform.set_threshold_percent(value)
+        self.set_threshold(value)
 
     # 更新 threshold 顯示
     def set_threshold(self, value: int) -> None:
         self.waveform.set_threshold_percent(value)
+
+    # 設定 Gain 拉桿範圍
+    def set_gain_range(self, minimum: int, maximum: int, value: int, max_value: float) -> None:
+        self.gain_slider.setRange(minimum, maximum)
+        self.gain_slider.setValue(value)
+        self.set_gain(max_value)
+
+    # 更新示波器 Gain
+    def set_gain(self, value: float) -> None:
+        self.waveform.set_max_value(value)
+
+    # 設定 Smooth 拉桿範圍
+    def set_smooth_range(self, minimum: int, maximum: int, value: int) -> None:
+        self.smooth_slider.setRange(minimum, maximum)
+        self.smooth_slider.setValue(value)
+
+    # 更新 Smooth 顯示
+    def set_smooth(self, value: float) -> None:
+        pass
+
+    # 設定 Sens 拉桿範圍
+    def set_sens_range(self, minimum: int, maximum: int, value: int) -> None:
+        self.sens_slider.setRange(minimum, maximum)
+        self.sens_slider.setValue(value)
+
+    # 更新 Sens 顯示
+    def set_sens(self, value: int) -> None:
+        pass
 
     # 套用啟動時的 waveform / video 比例
     def apply_default_splitter_sizes(self) -> None:
