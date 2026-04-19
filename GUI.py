@@ -160,7 +160,7 @@ TOOLBAR_SCROLL_BOTTOM_RESERVED_HEIGHT = 4 # toolbar 內容下方預留給水平 
 CAMERA_SETTING_DIALOG_WIDTH = 420 # Setting 小視窗寬度
 CAMERA_SETTING_LABEL_WIDTH = 64 # Setting 相機設定名稱寬度
 CAMERA_SETTING_AUTO_WIDTH = 54 # Setting auto checkbox 寬度
-CAMERA_SETTING_VALUE_WIDTH = 83 # Setting 數值輸入寬度
+CAMERA_SETTING_VALUE_WIDTH = 90 # Setting 數值輸入寬度
 CAMERA_SETTING_SLIDER_SCALE = 100 # 小數設定轉成水平 slider 整數刻度
 CAMERA_EXPOSURE_MIN = 0.0 # 曝光控制最小值，實際支援依相機 driver
 CAMERA_EXPOSURE_MAX = 255.0 # 曝光控制最大值，實際支援依相機 driver
@@ -373,8 +373,11 @@ class BorderCheckBox(QCheckBox):
 
 # Setting 小視窗
 class CameraSettingsDialog(QDialog):
-    exposure_changed = Signal(bool, float)
-    shutter_changed = Signal(bool, float)
+    exposure_changed = Signal(float)
+    shutter_changed = Signal(float)
+    camera_auto_changed = Signal(bool)
+    camera_reset_requested = Signal()
+    software_control_changed = Signal(bool)
     roi_reset_requested = Signal()
     panel_reset_requested = Signal()
     adjustment_reset_requested = Signal()
@@ -392,23 +395,77 @@ class CameraSettingsDialog(QDialog):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        self.exposure_auto, self.exposure_value, self.exposure_slider = self._add_camera_row(
-            layout,
+        self.software_control_check = BorderCheckBox("Use Software Camera Control")
+        self.software_control_check.setChecked(True)
+        self.software_control_check.stateChanged.connect(self.change_software_control)
+        layout.addWidget(self.software_control_check)
+
+        camera_grid = QGridLayout()
+        camera_grid.setContentsMargins(0, 0, 0, 0)
+        camera_grid.setSpacing(8)
+        self.camera_auto_check = BorderCheckBox("Auto")
+        self.camera_auto_check.setChecked(False)
+        self.camera_auto_check.setFixedWidth(CAMERA_SETTING_AUTO_WIDTH)
+        self.camera_auto_check.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.camera_auto_check.stateChanged.connect(self.change_camera_auto)
+        camera_grid.addWidget(self.camera_auto_check, 0, 1, 2, 1)
+
+        self.exposure_value, self.exposure_slider = self._add_camera_row(
+            camera_grid,
+            0,
             "Exposure",
             CAMERA_EXPOSURE_MIN,
             CAMERA_EXPOSURE_MAX,
             CAMERA_EXPOSURE_DEFAULT,
             self.exposure_changed,
         )
-        self.shutter_auto, self.shutter_value, self.shutter_slider = self._add_camera_row(
-            layout,
+        self.shutter_value, self.shutter_slider = self._add_camera_row(
+            camera_grid,
+            1,
             "Shutter",
             CAMERA_SHUTTER_MIN,
             CAMERA_SHUTTER_MAX,
             CAMERA_SHUTTER_DEFAULT,
             self.shutter_changed,
         )
+        camera_grid.setColumnStretch(3, 1)
+        layout.addLayout(camera_grid)
         self._add_reset_row(layout)
+        self.set_camera_controls_enabled(True)
+
+    # 切換是否允許 CV2 寫入 camera 設定
+    def change_software_control(self, state: int) -> None:
+        enabled = state == Qt.CheckState.Checked.value
+        self.set_camera_controls_enabled(enabled)
+        self.software_control_changed.emit(enabled)
+
+    # 同步 controller 目前的軟體控制狀態
+    def set_software_control_enabled(self, enabled: bool) -> None:
+        self.software_control_check.blockSignals(True)
+        self.software_control_check.setChecked(enabled)
+        self.software_control_check.blockSignals(False)
+        self.set_camera_controls_enabled(enabled)
+
+    # 啟用或停用會寫入 camera 的控制項
+    def set_camera_controls_enabled(self, enabled: bool) -> None:
+        for widget in (
+            self.camera_auto_check,
+            self.exposure_value,
+            self.exposure_slider,
+            self.shutter_value,
+            self.shutter_slider,
+        ):
+            widget.setEnabled(enabled)
+
+    # 同步持續 auto 狀態
+    def set_camera_auto_enabled(self, enabled: bool) -> None:
+        self.camera_auto_check.blockSignals(True)
+        self.camera_auto_check.setChecked(enabled)
+        self.camera_auto_check.blockSignals(False)
+
+    # 切換持續 auto
+    def change_camera_auto(self, state: int) -> None:
+        self.camera_auto_changed.emit(state == Qt.CheckState.Checked.value)
 
     # 建立 reset 功能列
     def _add_reset_row(self, layout: QVBoxLayout) -> None:
@@ -438,58 +495,67 @@ class CameraSettingsDialog(QDialog):
         reset_layout.addWidget(reset_spacer, SETTING_RESET_SPACER_STRETCH)
         layout.addLayout(reset_layout)
 
-    # 將相機控制列重置回 auto
+    # 將相機控制列重置回預設值，不主動寫入 camera
     def reset_camera_controls(self) -> None:
+        self.set_software_control_enabled(False)
+        self.set_camera_auto_enabled(False)
         self._reset_camera_row(
-            self.exposure_auto,
             self.exposure_value,
             self.exposure_slider,
             CAMERA_EXPOSURE_DEFAULT,
         )
         self._reset_camera_row(
-            self.shutter_auto,
             self.shutter_value,
             self.shutter_slider,
             CAMERA_SHUTTER_DEFAULT,
         )
-        self.exposure_changed.emit(True, CAMERA_EXPOSURE_DEFAULT)
-        self.shutter_changed.emit(True, CAMERA_SHUTTER_DEFAULT)
+        self.camera_reset_requested.emit()
 
-    # 還原單列相機控制的 auto、數值與 slider
+    # 還原單列相機控制的數值與 slider
     def _reset_camera_row(
         self,
-        auto_check: QCheckBox,
         value_spin: QDoubleSpinBox,
         slider: QSlider,
         value: float,
     ) -> None:
-        auto_check.blockSignals(True)
         value_spin.blockSignals(True)
         slider.blockSignals(True)
-        auto_check.setChecked(True)
         value_spin.setValue(value)
         slider.setValue(round(value * CAMERA_SETTING_SLIDER_SCALE))
-        value_spin.setEnabled(False)
-        slider.setEnabled(False)
-        auto_check.blockSignals(False)
         value_spin.blockSignals(False)
         slider.blockSignals(False)
 
-    # 建立單列 auto checkbox、數值框和水平滑桿
+    # 從 camera 讀回數值後同步到控制列
+    def set_exposure_value(self, value: float) -> None:
+        self._set_camera_row_value(self.exposure_value, self.exposure_slider, value)
+
+    # 從 camera 讀回數值後同步到控制列
+    def set_shutter_value(self, value: float) -> None:
+        self._set_camera_row_value(self.shutter_value, self.shutter_slider, value)
+
+    # 更新控制列但不要再送出 camera 寫入
+    def _set_camera_row_value(
+        self,
+        value_spin: QDoubleSpinBox,
+        slider: QSlider,
+        value: float,
+    ) -> None:
+        value = max(value_spin.minimum(), min(value, value_spin.maximum()))
+        self._reset_camera_row(value_spin, slider, value)
+
+    # 建立單列數值框和水平滑桿
     def _add_camera_row(
         self,
-        layout: QVBoxLayout,
+        layout: QGridLayout,
+        row: int,
         label_text: str,
         minimum: float,
         maximum: float,
         value: float,
         changed_signal: Signal,
-    ) -> tuple[QCheckBox, QDoubleSpinBox, QSlider]:
+    ) -> tuple[QDoubleSpinBox, QSlider]:
         label = QLabel(label_text)
         label.setFixedWidth(CAMERA_SETTING_LABEL_WIDTH)
-        auto_check = BorderCheckBox("auto")
-        auto_check.setChecked(True)
-        auto_check.setFixedWidth(CAMERA_SETTING_AUTO_WIDTH)
 
         value_spin = QDoubleSpinBox()
         value_spin.setRange(minimum, maximum)
@@ -508,13 +574,7 @@ class CameraSettingsDialog(QDialog):
         slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         def emit_value() -> None:
-            changed_signal.emit(auto_check.isChecked(), value_spin.value())
-
-        def set_manual_enabled() -> None:
-            enabled = not auto_check.isChecked()
-            value_spin.setEnabled(enabled)
-            slider.setEnabled(enabled)
-            emit_value()
+            changed_signal.emit(value_spin.value())
 
         def update_spin(slider_value: int) -> None:
             value_spin.blockSignals(True)
@@ -528,20 +588,13 @@ class CameraSettingsDialog(QDialog):
             slider.blockSignals(False)
             emit_value()
 
-        auto_check.stateChanged.connect(set_manual_enabled)
         slider.valueChanged.connect(update_spin)
         value_spin.valueChanged.connect(update_slider)
-        set_manual_enabled()
 
-        row_layout = QHBoxLayout()
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(8)
-        row_layout.addWidget(label)
-        row_layout.addWidget(auto_check)
-        row_layout.addWidget(value_spin)
-        row_layout.addWidget(slider, 1)
-        layout.addLayout(row_layout)
-        return auto_check, value_spin, slider
+        layout.addWidget(label, row, 0)
+        layout.addWidget(value_spin, row, 2)
+        layout.addWidget(slider, row, 3)
+        return value_spin, slider
 
 
 # 影片顯示與 ROI 編輯區
@@ -579,6 +632,24 @@ class VideoWidget(QWidget):
         self.frame_size = frame_size
         self.update()
 
+    # 一次更新影像與 overlay，避免同一幀觸發多次重畫
+    def set_frame_state(
+        self,
+        image: QImage,
+        frame_size: tuple[int, int],
+        roi: tuple[int, int, int, int] | None,
+        reference_center: tuple[float, float] | None,
+        current_center: tuple[float, float] | None,
+        status_text: str,
+    ) -> None:
+        self.image = image
+        self.frame_size = frame_size
+        self.roi = roi
+        self.reference_center = reference_center
+        self.current_center = current_center
+        self.status_text = status_text
+        self.update()
+
     # 清除目前顯示的影像
     def clear_frame(self) -> None:
         self.image = None
@@ -601,6 +672,8 @@ class VideoWidget(QWidget):
 
     # 更新 ROI 顯示
     def set_roi(self, roi: tuple[int, int, int, int] | None) -> None:
+        if self.roi == roi:
+            return
         self.roi = roi
         self.update()
 
@@ -610,12 +683,16 @@ class VideoWidget(QWidget):
         reference_center: tuple[float, float] | None,
         current_center: tuple[float, float] | None,
     ) -> None:
+        if self.reference_center == reference_center and self.current_center == current_center:
+            return
         self.reference_center = reference_center
         self.current_center = current_center
         self.update()
 
     # 更新狀態文字
     def set_status(self, text: str) -> None:
+        if self.status_text == text:
+            return
         self.status_text = text
         self.update()
 
@@ -1019,12 +1096,18 @@ class WaveformWidget(QWidget):
 
     # 更新 threshold 顯示線
     def set_threshold_percent(self, threshold_percent: int) -> None:
-        self.threshold_percent = max(0, min(threshold_percent, 100))
+        threshold_percent = max(0, min(threshold_percent, 100))
+        if self.threshold_percent == threshold_percent:
+            return
+        self.threshold_percent = threshold_percent
         self.update()
 
     # 更新示波器最大位移值
     def set_max_value(self, max_value: float) -> None:
-        self.max_value = max(0.0, max_value)
+        max_value = max(0.0, max_value)
+        if self.max_value == max_value:
+            return
+        self.max_value = max_value
         self.update()
 
     # 繪製波型
@@ -1049,8 +1132,13 @@ class WaveformWidget(QWidget):
         painter.setPen(QPen(WAVE_GRID_COLOR, 1))
         painter.drawRect(graph)
 
-        valid_values = [value for value in self.values if value is not None]
-        if len(valid_values) < 2:
+        valid_count = 0
+        for value in self.values:
+            if value is not None:
+                valid_count += 1
+                if valid_count >= 2:
+                    break
+        if valid_count < 2:
             painter.drawLine(graph.left(), graph.bottom(), graph.right(), graph.bottom())
             self._draw_threshold(painter, graph)
             self._draw_cursor(painter, graph)
@@ -1141,6 +1229,8 @@ class RpmWidget(QWidget):
 
     # 更新 RPM 顯示
     def set_rpm(self, rpm: float | None) -> None:
+        if self.rpm == rpm:
+            return
         self.rpm = rpm
         self.update()
 

@@ -6,7 +6,8 @@ from collections import deque
 from dataclasses import dataclass
 from math import hypot
 from pathlib import Path
-from threading import Thread
+from queue import Empty, Queue
+from threading import Event, Lock, Thread
 from time import perf_counter
 
 import cv2
@@ -23,11 +24,13 @@ APP_VERSION = "1.1.1" # App 版本號
 APP_TITLE = f"{APP_NAME} {APP_VERSION}" # 視窗標題統一由 main 注入
 DEFAULT_CAMERA_INDEXES = tuple(range(6)) # 第一版先列出常見 camera index
 CAMERA_AUTO_EXPOSURE_VALUE: float | None = 0.25 # 手動快門時送給 DSHOW 的自動曝光關閉值
-CAMERA_AUTO_EXPOSURE_AUTO_VALUE: float | None = 0.75 # 勾回 auto 時請相機重新自動計算曝光
-CAMERA_EXPOSURE_VALUE: float | None = None # None 表示不改曝光增益，實際範圍依相機驅動
-CAMERA_SHUTTER_VALUE: float | None = None # None 表示不改快門/曝光時間，實際範圍依相機驅動
+CAMERA_AUTO_EXPOSURE_AUTO_VALUE: float | None = 0.75 # 持續 auto 時送給 DSHOW 的自動曝光值
 CAMERA_EXPOSURE_PROPERTY = cv2.CAP_PROP_GAIN # 曝光列對應 OpenCV gain
 CAMERA_SHUTTER_PROPERTY = cv2.CAP_PROP_EXPOSURE # 快門列對應 OpenCV exposure
+CAMERA_MANUAL_EXPOSURE_DEFAULT = 192.0 # 軟體手動控制預設 gain
+CAMERA_MANUAL_SHUTTER_DEFAULT = -6.0 # 軟體手動控制預設快門/曝光時間
+SOFTWARE_CAMERA_CONTROL_DEFAULT = False # 啟動時是否讓 CV2 介入 camera 控制
+CAMERA_AUTO_DEFAULT = False # 軟體控制啟用時是否使用持續 auto
 DEFAULT_FPS = 30.0 # 攝影機或影片讀不到 FPS 時使用
 SIGNAL_WINDOW_SECONDS = 5.0 # 波型顯示最近幾秒
 MIN_ROI_SIZE = 8 # ROI 太小通常是誤畫
@@ -142,23 +145,26 @@ class CaptureSource:
     # 開啟指定攝影機
     def open_camera(self, index: int) -> bool:
         capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-        self._apply_camera_exposure(capture)
         return self._open(capture, f"Camera {index}", "Camera", str(index))
-
-    # 套用一次性的相機曝光設定
-    def _apply_camera_exposure(self, capture: cv2.VideoCapture) -> None:
-        if CAMERA_AUTO_EXPOSURE_VALUE is not None:
-            capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, CAMERA_AUTO_EXPOSURE_VALUE)
-        if CAMERA_EXPOSURE_VALUE is not None:
-            capture.set(CAMERA_EXPOSURE_PROPERTY, CAMERA_EXPOSURE_VALUE)
-        if CAMERA_SHUTTER_VALUE is not None:
-            capture.set(CAMERA_SHUTTER_PROPERTY, CAMERA_SHUTTER_VALUE)
 
     # 即時套用目前相機設定
     def set_camera_property(self, property_id: int, value: float) -> bool:
         if self.capture is None or self.mode != "Camera":
             return False
         return bool(self.capture.set(property_id, value))
+
+    # 讀取目前相機設定值
+    def get_camera_property(self, property_id: int) -> float | None:
+        if self.capture is None or self.mode != "Camera":
+            return None
+        value = float(self.capture.get(property_id))
+        return value if value != -1 else None
+
+    # 解除手動曝光，交回 camera driver 自動控制
+    def restore_camera_auto_exposure(self) -> bool:
+        if CAMERA_AUTO_EXPOSURE_AUTO_VALUE is None:
+            return False
+        return self.set_camera_property(cv2.CAP_PROP_AUTO_EXPOSURE, CAMERA_AUTO_EXPOSURE_AUTO_VALUE)
 
     # 套用新的 OpenCV capture
     def _open(self, capture: cv2.VideoCapture, label: str, mode: str, identifier: str) -> bool:
@@ -192,6 +198,181 @@ class CaptureSource:
         self.identifier = None
 
 
+# 背景 camera 讀取器，避免 OpenCV read 卡住 UI thread
+class CameraWorker:
+    def __init__(self) -> None:
+        self.thread: Thread | None = None
+        self.stop_event = Event()
+        self.command_queue: Queue[tuple] = Queue()
+        self.lock = Lock()
+        self.capture: cv2.VideoCapture | None = None
+        self.label = "No source"
+        self.fps = DEFAULT_FPS
+        self.mode: str | None = None
+        self.identifier: str | None = None
+        self.latest_frame = None
+        self.frame_sequence = 0
+        self.opening = False
+        self.open_failed = False
+        self.software_control_enabled = SOFTWARE_CAMERA_CONTROL_DEFAULT
+        self.auto_enabled = CAMERA_AUTO_DEFAULT
+        self.manual_exposure = CAMERA_MANUAL_EXPOSURE_DEFAULT
+        self.manual_shutter = CAMERA_MANUAL_SHUTTER_DEFAULT
+
+    # 開始在背景開啟 camera
+    def open_camera(
+        self,
+        index: int,
+        software_control_enabled: bool,
+        auto_enabled: bool,
+        manual_exposure: float,
+        manual_shutter: float,
+    ) -> None:
+        self.release()
+        self.stop_event.clear()
+        self.open_failed = False
+        self.opening = True
+        self.label = f"Camera {index}"
+        self.fps = DEFAULT_FPS
+        self.mode = "Camera"
+        self.identifier = str(index)
+        self.latest_frame = None
+        self.frame_sequence = 0
+        self.software_control_enabled = software_control_enabled
+        self.auto_enabled = auto_enabled
+        self.manual_exposure = manual_exposure
+        self.manual_shutter = manual_shutter
+        self.thread = Thread(target=self._run, args=(index,), daemon=True)
+        self.thread.start()
+
+    # 背景 thread 主迴圈
+    def _run(self, index: int) -> None:
+        capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        if not capture.isOpened():
+            capture.release()
+            self.open_failed = True
+            self.opening = False
+            return
+
+        fps = float(capture.get(cv2.CAP_PROP_FPS))
+        with self.lock:
+            self.capture = capture
+            self.fps = fps if fps > 0 else DEFAULT_FPS
+            self.opening = False
+        self._apply_camera_mode(capture)
+
+        while not self.stop_event.is_set():
+            self._process_commands(capture)
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                self.open_failed = True
+                break
+            with self.lock:
+                self.latest_frame = frame
+                self.frame_sequence += 1
+
+        capture.release()
+        with self.lock:
+            if self.capture is capture:
+                self.capture = None
+
+    # 處理 UI thread 送來的 camera 設定命令
+    def _process_commands(self, capture: cv2.VideoCapture) -> None:
+        while True:
+            try:
+                command = self.command_queue.get_nowait()
+            except Empty:
+                return
+
+            name = command[0]
+            if name == "software":
+                self.software_control_enabled = command[1]
+                self._apply_camera_mode(capture)
+            elif name == "auto":
+                self.auto_enabled = command[1]
+                self._apply_camera_mode(capture)
+            elif name == "manual":
+                _, property_id, value = command
+                if property_id == CAMERA_EXPOSURE_PROPERTY:
+                    self.manual_exposure = value
+                elif property_id == CAMERA_SHUTTER_PROPERTY:
+                    self.manual_shutter = value
+                self.auto_enabled = False
+                self._apply_manual_control(capture)
+            elif name == "restore_auto":
+                self.software_control_enabled = False
+                self.auto_enabled = True
+                self._apply_driver_auto(capture)
+
+    # 依目前模式套用 camera 控制
+    def _apply_camera_mode(self, capture: cv2.VideoCapture) -> None:
+        if not self.software_control_enabled:
+            self._apply_driver_auto(capture)
+            return
+        if self.auto_enabled:
+            self._apply_driver_auto(capture)
+            return
+        self._apply_manual_control(capture)
+
+    # 交回 driver 持續 auto
+    def _apply_driver_auto(self, capture: cv2.VideoCapture) -> None:
+        if CAMERA_AUTO_EXPOSURE_AUTO_VALUE is not None:
+            capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, CAMERA_AUTO_EXPOSURE_AUTO_VALUE)
+
+    # 套用軟體手動 gain / shutter
+    def _apply_manual_control(self, capture: cv2.VideoCapture) -> None:
+        if CAMERA_AUTO_EXPOSURE_VALUE is not None:
+            capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, CAMERA_AUTO_EXPOSURE_VALUE)
+        capture.set(CAMERA_EXPOSURE_PROPERTY, self.manual_exposure)
+        capture.set(CAMERA_SHUTTER_PROPERTY, self.manual_shutter)
+
+    # 送出 software control 切換命令
+    def set_software_control(self, enabled: bool) -> None:
+        self.command_queue.put(("software", enabled))
+
+    # 送出持續 auto 切換命令
+    def set_auto_control(self, enabled: bool) -> None:
+        self.command_queue.put(("auto", enabled))
+
+    # 送出手動數值命令
+    def set_manual_property(self, property_id: int, value: float) -> None:
+        self.command_queue.put(("manual", property_id, value))
+
+    # 解除軟體控制並交回 driver auto
+    def restore_camera_auto_exposure(self) -> None:
+        self.command_queue.put(("restore_auto",))
+
+    # 取出最新一幀
+    def read_latest(self) -> tuple[bool, object | None, int]:
+        with self.lock:
+            return self.latest_frame is not None, self.latest_frame, self.frame_sequence
+
+    # 判斷 camera 是否正在背景開啟
+    def is_opening(self) -> bool:
+        return self.opening
+
+    # 判斷 camera 是否可讀
+    def is_opened(self) -> bool:
+        return self.capture is not None
+
+    # 停止背景讀取並釋放 camera
+    def release(self) -> None:
+        self.stop_event.set()
+        if self.thread is not None and self.thread.is_alive():
+            self.thread.join(timeout=1.5)
+        self.thread = None
+        self.stop_event.clear()
+        self.capture = None
+        self.latest_frame = None
+        self.frame_sequence = 0
+        self.opening = False
+        self.open_failed = False
+        self.label = "No source"
+        self.fps = DEFAULT_FPS
+        self.mode = None
+        self.identifier = None
+
+
 # 從 ROI 位移產生呼吸相關的運動訊號
 class RoiTracker:
     def __init__(self) -> None:
@@ -207,37 +388,50 @@ class RoiTracker:
             clipLimit=MATCH_CLAHE_CLIP_LIMIT,
             tileGridSize=MATCH_CLAHE_TILE_GRID_SIZE,
         )
+        self.motion_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         self.match_mode = MATCH_MODE_NONE
         self.template = None
 
     # 更新 match 使用的影像增強模式
     def set_match_mode(self, mode: str) -> None:
+        if self.match_mode == mode:
+            return
         self.match_mode = mode
 
     # 更新 ROI 追蹤搜尋範圍
     def set_search_margin(self, search_margin: int) -> None:
-        self.search_margin = max(1, search_margin)
+        search_margin = max(1, search_margin)
+        if self.search_margin == search_margin:
+            return
+        self.search_margin = search_margin
 
     # 更新位移訊號平滑強度
     def set_smooth_strength(self, smooth_strength: float) -> None:
-        self.smooth_strength = max(0.0, min(smooth_strength, 1.0))
+        smooth_strength = max(0.0, min(smooth_strength, 1.0))
+        if self.smooth_strength == smooth_strength:
+            return
+        self.smooth_strength = smooth_strength
         self.smoothed_displacement = None
 
     # 依 FPS 重設波型長度
     def configure(self, fps: float) -> None:
         max_samples = max(2, int(fps * SIGNAL_WINDOW_SECONDS))
         self.values = [None] * max_samples
-        self.cursor_index = 0
-        self.reference_roi = None
-        self.current_roi = None
-        self.reference_center = None
-        self.smoothed_displacement = None
-        self.template = None
+        self._clear_values()
+        self._clear_tracking_state()
 
     # ROI 改變時清掉上一段訊號
     def reset(self) -> None:
+        self._clear_values()
+        self._clear_tracking_state()
+
+    # 清空波型資料
+    def _clear_values(self) -> None:
         self.values = [None] * len(self.values)
         self.cursor_index = 0
+
+    # 清空 ROI 追蹤狀態
+    def _clear_tracking_state(self) -> None:
         self.reference_roi = None
         self.current_roi = None
         self.reference_center = None
@@ -254,8 +448,7 @@ class RoiTracker:
         self.current_roi = roi
         self.reference_center = roi.center()
         self.template = gray
-        self.values = [None] * len(self.values)
-        self.cursor_index = 0
+        self._clear_values()
         self.smoothed_displacement = None
 
     # 更新單幀 ROI 位置與位移訊號
@@ -323,8 +516,7 @@ class RoiTracker:
     # 用形態學梯度凸顯局部位移邊界
     def _motion_edges(self, gray):
         blurred = cv2.GaussianBlur(gray, MATCH_BLUR_KERNEL_SIZE, 0)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        return cv2.morphologyEx(blurred, cv2.MORPH_GRADIENT, kernel)
+        return cv2.morphologyEx(blurred, cv2.MORPH_GRADIENT, self.motion_kernel)
 
     # 將目前中心到初始中心的線長加入波型
     def _append_displacement(self, roi: Roi) -> float:
@@ -357,7 +549,7 @@ class RoiTracker:
 
     # 取出目前波型資料
     def series(self) -> list[float | None]:
-        return list(self.values)
+        return self.values
 
     # 取得下一筆資料會寫入的位置
     def cursor(self) -> int:
@@ -445,9 +637,8 @@ def frame_to_qimage(frame) -> QImage:
         return image.copy()
 
     height, width = frame.shape[:2]
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     bytes_per_line = 3 * width
-    image = QImage(rgb_frame.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+    image = QImage(frame.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
     return image.copy()
 
 
@@ -475,6 +666,7 @@ class MonitorController:
         )
         self.window.detect_rate_spin.setValue(DETECTION_RATE_DEFAULT_HZ)
         self.source = CaptureSource()
+        self.camera_worker = CameraWorker()
         self.tracker = RoiTracker()
         self.tracker.set_search_margin(DETECTION_RANGE_DEFAULT)
         self.tracker.set_smooth_strength(SMOOTH_DEFAULT)
@@ -486,6 +678,11 @@ class MonitorController:
         )
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
+        self.use_software_camera_control = SOFTWARE_CAMERA_CONTROL_DEFAULT
+        self.camera_auto_enabled = CAMERA_AUTO_DEFAULT
+        self.manual_exposure_value = CAMERA_MANUAL_EXPOSURE_DEFAULT
+        self.manual_shutter_value = CAMERA_MANUAL_SHUTTER_DEFAULT
+        self.last_camera_frame_sequence = 0
         self.playing = False
         self.roi: Roi | None = None
         self.last_frame = None
@@ -560,12 +757,16 @@ class MonitorController:
     # 開啟目前選到的攝影機
     def open_camera(self) -> bool:
         index = int(self.window.camera_menu.currentData() or 0)
-        if not self.source.open_camera(index):
-            self.window.set_status(f"Unable to open Camera {index}.")
-            return False
-
-        self._reset_for_loaded_source(playing=True)
-        self.window.set_status(with_view_hint(f"Camera opened: Camera {index}"))
+        self.source.release()
+        self.camera_worker.open_camera(
+            index,
+            self.use_software_camera_control,
+            self.camera_auto_enabled,
+            self.manual_exposure_value,
+            self.manual_shutter_value,
+        )
+        self._reset_for_camera_source(index, playing=True)
+        self.window.set_status(with_view_hint(f"Opening Camera {index} in background..."))
         self._start_timer()
         return True
 
@@ -652,32 +853,136 @@ class MonitorController:
         if not self.camera_settings_connected:
             dialog.exposure_changed.connect(self.change_camera_exposure)
             dialog.shutter_changed.connect(self.change_camera_shutter)
+            dialog.camera_auto_changed.connect(self.change_camera_auto_control)
+            dialog.camera_reset_requested.connect(self.reset_camera_firmware_control)
+            dialog.software_control_changed.connect(self.change_software_camera_control)
             dialog.roi_reset_requested.connect(self.clear_roi)
             dialog.panel_reset_requested.connect(self.reset_layout)
             dialog.adjustment_reset_requested.connect(self.reset_settings)
             self.camera_settings_connected = True
+        dialog.set_software_control_enabled(self.use_software_camera_control)
+        dialog.set_camera_auto_enabled(self.camera_auto_enabled)
+        dialog.set_exposure_value(self.manual_exposure_value)
+        dialog.set_shutter_value(self.manual_shutter_value)
+
+    # 切換是否允許 CV2 介入 camera 設定
+    def change_software_camera_control(self, enabled: bool) -> None:
+        self.use_software_camera_control = enabled
+        if enabled:
+            self.camera_auto_enabled = False
+            self.manual_exposure_value = CAMERA_MANUAL_EXPOSURE_DEFAULT
+            self.manual_shutter_value = CAMERA_MANUAL_SHUTTER_DEFAULT
+            dialog = self.window.camera_settings_dialog
+            if dialog is not None:
+                dialog.set_camera_auto_enabled(False)
+                dialog.set_exposure_value(self.manual_exposure_value)
+                dialog.set_shutter_value(self.manual_shutter_value)
+            self.camera_worker.set_software_control(True)
+            self.camera_worker.set_manual_property(CAMERA_EXPOSURE_PROPERTY, self.manual_exposure_value)
+            self.camera_worker.set_manual_property(CAMERA_SHUTTER_PROPERTY, self.manual_shutter_value)
+            self.window.set_status(
+                f"Software camera control enabled: Exposure {self.manual_exposure_value:.2f}, "
+                f"Shutter {self.manual_shutter_value:.2f}."
+            )
+            return
+
+        self.camera_auto_enabled = False
+        dialog = self.window.camera_settings_dialog
+        if dialog is not None:
+            dialog.set_camera_auto_enabled(False)
+        self.camera_worker.restore_camera_auto_exposure()
+        if self.source.mode == "Camera":
+            self.source.restore_camera_auto_exposure()
+        self.window.set_status("Software camera control disabled. Camera auto restored.")
 
     # 即時更新相機曝光增益
-    def change_camera_exposure(self, auto_enabled: bool, value: float) -> None:
-        self.change_camera_property(auto_enabled, CAMERA_EXPOSURE_PROPERTY, value, "Exposure")
+    def change_camera_exposure(self, value: float) -> None:
+        self.change_camera_property(CAMERA_EXPOSURE_PROPERTY, value, "Exposure")
 
     # 即時更新相機快門/曝光時間
-    def change_camera_shutter(self, auto_enabled: bool, value: float) -> None:
-        self.change_camera_property(auto_enabled, CAMERA_SHUTTER_PROPERTY, value, "Shutter")
+    def change_camera_shutter(self, value: float) -> None:
+        self.change_camera_property(CAMERA_SHUTTER_PROPERTY, value, "Shutter")
 
     # 套用 Setting 小視窗的相機控制值
-    def change_camera_property(self, auto_enabled: bool, property_id: int, value: float, label: str) -> None:
-        if auto_enabled:
-            if CAMERA_AUTO_EXPOSURE_AUTO_VALUE is not None:
-                self.source.set_camera_property(cv2.CAP_PROP_AUTO_EXPOSURE, CAMERA_AUTO_EXPOSURE_AUTO_VALUE)
-            self.window.set_status(f"{label} set to auto.")
+    def change_camera_property(self, property_id: int, value: float, label: str) -> None:
+        if not self.use_software_camera_control:
+            self.window.set_status("Enable software camera control before changing camera settings.")
             return
-        if CAMERA_AUTO_EXPOSURE_VALUE is not None:
-            self.source.set_camera_property(cv2.CAP_PROP_AUTO_EXPOSURE, CAMERA_AUTO_EXPOSURE_VALUE)
-        if self.source.set_camera_property(property_id, value):
+        self.camera_auto_enabled = False
+        if property_id == CAMERA_EXPOSURE_PROPERTY:
+            self.manual_exposure_value = value
+        elif property_id == CAMERA_SHUTTER_PROPERTY:
+            self.manual_shutter_value = value
+        dialog = self.window.camera_settings_dialog
+        if dialog is not None:
+            dialog.set_camera_auto_enabled(False)
+        if self.camera_worker.mode == "Camera":
+            self.camera_worker.set_manual_property(property_id, value)
+            self.window.set_status(f"{label} set to {value:.2f}.")
+        elif self.source.set_camera_property(property_id, value):
             self.window.set_status(f"{label} set to {value:.2f}.")
         else:
             self.window.set_status(f"{label} setting is not available for the current camera.")
+
+    # 切換持續 auto 控制
+    def change_camera_auto_control(self, enabled: bool) -> None:
+        if not self.use_software_camera_control:
+            self.window.set_status("Enable software camera control before using camera auto.")
+            return
+        self.camera_auto_enabled = enabled
+        if self.camera_worker.mode == "Camera":
+            self.camera_worker.set_auto_control(enabled)
+            if not enabled:
+                self.camera_worker.set_manual_property(CAMERA_EXPOSURE_PROPERTY, self.manual_exposure_value)
+                self.camera_worker.set_manual_property(CAMERA_SHUTTER_PROPERTY, self.manual_shutter_value)
+            self.window.set_status("Camera continuous auto enabled." if enabled else "Camera manual control enabled.")
+            return
+        if self.source.mode == "Camera":
+            value = CAMERA_AUTO_EXPOSURE_AUTO_VALUE if enabled else CAMERA_AUTO_EXPOSURE_VALUE
+            if value is not None:
+                self.source.set_camera_property(cv2.CAP_PROP_AUTO_EXPOSURE, value)
+        self.window.set_status("Camera continuous auto enabled." if enabled else "Camera manual control enabled.")
+
+    # 重開 camera，讓韌體回到未被 CV2 設定介入的狀態
+    def reset_camera_firmware_control(self) -> None:
+        self.manual_exposure_value = CAMERA_MANUAL_EXPOSURE_DEFAULT
+        self.manual_shutter_value = CAMERA_MANUAL_SHUTTER_DEFAULT
+        dialog = self.window.camera_settings_dialog
+        if dialog is not None:
+            dialog.set_software_control_enabled(self.use_software_camera_control)
+            dialog.set_camera_auto_enabled(self.camera_auto_enabled)
+            dialog.set_exposure_value(CAMERA_MANUAL_EXPOSURE_DEFAULT)
+            dialog.set_shutter_value(CAMERA_MANUAL_SHUTTER_DEFAULT)
+        self.camera_worker.restore_camera_auto_exposure()
+        if self.camera_worker.mode != "Camera" and self.source.mode != "Camera":
+            self.window.set_status("Camera reset is available only in Camera mode.")
+            return
+
+        was_playing = self.playing
+        identifier = self.camera_worker.identifier or self.source.identifier or self.window.camera_menu.currentData() or 0
+        index = int(identifier)
+        self.timer.stop()
+        self.camera_worker.restore_camera_auto_exposure()
+        self.camera_worker.open_camera(
+            index,
+            self.use_software_camera_control,
+            self.camera_auto_enabled,
+            self.manual_exposure_value,
+            self.manual_shutter_value,
+        )
+        self.playing = was_playing
+        self.current_motion = 0.0
+        self.next_detection_time = 0.0
+        self.last_camera_frame_sequence = 0
+        self.breath_detector.reset()
+        self.window.set_playing(was_playing)
+        if self.roi is not None:
+            self.tracker.reset()
+        self.window.waveform.set_values(self.tracker.series(), self.tracker.cursor())
+        self.window.set_rpm(None)
+        if was_playing:
+            self._start_timer()
+        self.window.set_status("Camera reset in background.")
 
     # 還原偵測相關設定
     def reset_settings(self) -> None:
@@ -756,7 +1061,7 @@ class MonitorController:
     # 判斷是否需要開啟或切換相機
     def _should_open_selected_camera(self) -> bool:
         index = str(self.window.camera_menu.currentData() or 0)
-        return self.source.capture is None or self.source.mode != "Camera" or self.source.identifier != index
+        return self.camera_worker.mode != "Camera" or self.camera_worker.identifier != index
 
     # 判斷是否需要開啟影片
     def _should_open_selected_video(self) -> bool:
@@ -838,6 +1143,23 @@ class MonitorController:
         self.window.waveform.set_values(self.tracker.series(), self.tracker.cursor())
         self.window.set_rpm(None)
 
+    # camera 背景來源啟動時重置狀態
+    def _reset_for_camera_source(self, index: int, playing: bool) -> None:
+        self.playing = playing
+        self.roi = None
+        self.last_frame = None
+        self.current_motion = 0.0
+        self.tracker.configure(DEFAULT_FPS)
+        self.breath_detector.reset()
+        self.next_detection_time = 0.0
+        self.last_camera_frame_sequence = 0
+        self.window.set_playing(playing)
+        self.window.video.set_roi(None)
+        self.window.video.set_tracking_centers(None, None)
+        self.window.video.set_status(f"Camera {index}|Enhance: None|FPS: {format_fps(DEFAULT_FPS)}|Motion: 0.00")
+        self.window.waveform.set_values(self.tracker.series(), self.tracker.cursor())
+        self.window.set_rpm(None)
+
     # 停止並釋放目前來源
     def _stop_current_source(self) -> None:
         self.timer.stop()
@@ -848,6 +1170,7 @@ class MonitorController:
         self.tracker.reset()
         self.breath_detector.reset()
         self.next_detection_time = 0.0
+        self.camera_worker.release()
         self.source.release()
         self.window.set_playing(False)
         self.window.video.set_roi(None)
@@ -859,12 +1182,20 @@ class MonitorController:
 
     # 啟動播放 timer
     def _start_timer(self) -> None:
-        interval = max(10, int(1000 / self.source.fps))
+        fps = self.camera_worker.fps if self.camera_worker.mode == "Camera" else self.source.fps
+        interval = max(10, int(1000 / fps))
         self.timer.start(interval)
 
     # 更新影像與波型
     def update_frame(self) -> None:
-        if not self.playing or self.source.capture is None:
+        if not self.playing:
+            return
+
+        if self.camera_worker.mode == "Camera":
+            self.update_camera_frame()
+            return
+
+        if self.source.capture is None:
             return
 
         ok, frame = self.source.read()
@@ -893,6 +1224,52 @@ class MonitorController:
 
         self._display_frame(frame)
 
+    # 從背景 camera worker 取最新影格
+    def update_camera_frame(self) -> None:
+        if self.camera_worker.open_failed:
+            self.timer.stop()
+            self.playing = False
+            self.window.set_playing(False)
+            self.camera_worker.release()
+            self.window.set_status("Camera source was disconnected or failed to open.")
+            return
+
+        ok, frame, sequence = self.camera_worker.read_latest()
+        if not ok or frame is None or sequence == self.last_camera_frame_sequence:
+            return
+
+        self.last_camera_frame_sequence = sequence
+        if self.camera_worker.fps != self.source.fps:
+            self.source.fps = self.camera_worker.fps
+            if self.timer.isActive():
+                self._start_timer()
+        self.source.label = self.camera_worker.label
+        self.source.mode = self.camera_worker.mode
+        self.source.identifier = self.camera_worker.identifier
+        self.last_frame = frame
+        self.process_frame_analysis(frame)
+        self._display_frame(frame)
+
+    # 依目前 ROI 更新追蹤與呼吸訊號
+    def process_frame_analysis(self, frame) -> None:
+        now = perf_counter()
+        if self.roi is None or now < self.next_detection_time:
+            return
+
+        detection_interval = 1 / max(1, self.detection_rate_hz)
+        self.next_detection_time = now + detection_interval
+        tracked_roi, displacement = self.tracker.update(frame)
+        if tracked_roi is None:
+            return
+
+        self.roi = tracked_roi
+        self.current_motion = displacement
+        rpm, breath_detected = self.breath_detector.update(displacement, now)
+        if breath_detected:
+            self._play_peak_beep()
+        self.window.waveform.set_values(self.tracker.series(), self.tracker.cursor())
+        self.window.set_rpm(rpm)
+
     # 將目前影格送到 GUI
     def _display_frame(self, frame) -> None:
         display_frame = (
@@ -901,18 +1278,24 @@ class MonitorController:
         )
         image = frame_to_qimage(display_frame)
         frame_size = (frame.shape[1], frame.shape[0])
-        self.window.video.set_frame(image, frame_size)
-        self.window.video.set_roi(self.roi.as_tuple() if self.roi is not None else None)
-        self.window.video.set_tracking_centers(self.tracker.reference_center, self.tracker.current_center())
-        self.window.video.set_status(self._video_status_text())
+        self.window.video.set_frame_state(
+            image,
+            frame_size,
+            self.roi.as_tuple() if self.roi is not None else None,
+            self.tracker.reference_center,
+            self.tracker.current_center(),
+            self._video_status_text(),
+        )
 
     # 組合影片區左上角狀態標題
     def _video_status_text(self) -> str:
         enhance_mode = self.window.enhancement_menu.currentData() or self.window.enhancement_menu.currentText()
         enhance_text = f"Enhance: {enhance_mode}"
-        fps_text = format_fps(self.source.fps)
+        label = self.camera_worker.label if self.camera_worker.mode == "Camera" else self.source.label
+        fps = self.camera_worker.fps if self.camera_worker.mode == "Camera" else self.source.fps
+        fps_text = format_fps(fps)
         return (
-            f"{self.source.label}|{enhance_text}|"
+            f"{label}|{enhance_text}|"
             f"FPS: {fps_text}|Motion: {self.current_motion:.2f}"
         )
 
@@ -938,6 +1321,7 @@ class MonitorController:
     # 釋放攝影機與 timer
     def close(self) -> None:
         self.timer.stop()
+        self.camera_worker.release()
         self.source.release()
 
     # 啟動 app
