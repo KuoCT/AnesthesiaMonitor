@@ -19,7 +19,7 @@ from GUI import MonitorWindow
 
 # 參數控制區
 APP_NAME = "Anesthesia Monitor" # App 顯示名稱
-APP_VERSION = "1.1.0" # App 版本號
+APP_VERSION = "1.1.1" # App 版本號
 APP_TITLE = f"{APP_NAME} {APP_VERSION}" # 視窗標題統一由 main 注入
 DEFAULT_CAMERA_INDEXES = tuple(range(6)) # 第一版先列出常見 camera index
 CAMERA_AUTO_EXPOSURE_VALUE: float | None = 0.25 # 手動快門時送給 DSHOW 的自動曝光關閉值
