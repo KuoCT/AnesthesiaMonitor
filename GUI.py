@@ -4,10 +4,9 @@ import ctypes
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QSize, Qt, Signal
+from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractSpinBox,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -80,8 +79,8 @@ def set_windows_title_bar_color(window: QWidget) -> None:
 
 
 # 參數控制區
-DEFAULT_APP_SIZE = (1080, 780) # 啟動時 app 寬高
-TOOLBAR_GROUP_WIDTH = 1020 # toolbar 透明群組固定寬度
+DEFAULT_APP_SIZE = (760, 540) # 啟動時 app 寬高
+TOOLBAR_GROUP_WIDTH = 720 # toolbar 透明群組固定寬度
 APP_BG_HEX = "#18191A" # App 主背景
 TITLE_BAR_HEX = "#18191A" # Windows 原生標題列顏色
 TITLE_TEXT_HEX = "#e8e8e8" # Windows 原生標題列文字顏色
@@ -138,17 +137,8 @@ APP_CONTENT_MARGIN_X = 6 # app 內容左右留白
 APP_CONTENT_MARGIN_Y = 4 # app 內容上下留白
 APP_CONTENT_SPACING = 0 # toolbar 與主板塊間距
 TOOLBAR_ITEM_SPACING = 5 # toolbar 元件與群組固定間距
-TOOLBAR_GROUP_SPACING = 0 # toolbar 群組內 label 與輸入框間距
-TOOLBAR_GROUP_BORDER_HEX = CONTROL_BORDER_HEX # toolbar 數值群組外框顏色
-TOOLBAR_GROUP_BORDER_RADIUS = 4 # toolbar 數值群組外框圓角
-TOOLBAR_GROUP_PADDING_X = 5 # toolbar 數值群組左右內距
-TOOLBAR_GROUP_PADDING_Y = 3 # toolbar 數值群組上下內距
-TOOLBAR_GROUP_SPIN_HEIGHT = 24 # toolbar 數值群組內 QSpinBox 高度
-TOOLBAR_SPIN_MARGIN_RIGHT = 2 # toolbar QSpinBox 右側外距
-TOOLBAR_SPIN_VALUE_PADDING_X = 2 # toolbar QSpinBox 數值和箭頭保留距離
 TOOLBAR_MENU_STRETCH = 1 # toolbar 一般選單 expand 比例
 TOOLBAR_ENHANCE_STRETCH = 5 # toolbar Enhance 選單 expand 比例
-TOOLBAR_SPIN_GROUP_STRETCH = 1 # toolbar 數值群組 expand 比例
 CONTROL_PADDING_X = 6 # 控制元件左右 padding
 CONTROL_PADDING_Y = 6 # 控制元件上下 padding
 CHECKBOX_BORDER_HEX = CONTROL_BORDER_HEX # checkbox 外框顏色
@@ -157,9 +147,19 @@ TOOLBAR_SCROLL_HANDLE_HEX = "#90929C" # toolbar scroll handle 顏色
 TOOLBAR_SCROLL_HANDLE_HOVER_HEX = "#71737A" # toolbar scroll hover 顏色
 TOOLBAR_SCROLLBAR_HEIGHT = 4 # toolbar 水平 scroll 高度
 TOOLBAR_SCROLL_BOTTOM_RESERVED_HEIGHT = 4 # toolbar 內容下方預留給水平 scroll 的空白
-CAMERA_SETTING_DIALOG_WIDTH = 420 # Setting 小視窗寬度
-CAMERA_SETTING_LABEL_WIDTH = 64 # Setting 相機設定名稱寬度
-CAMERA_SETTING_AUTO_WIDTH = 54 # Setting auto checkbox 寬度
+CAMERA_SETTING_DIALOG_MIN_WIDTH = 435 # Setting 小視窗最小寬度
+CAMERA_SETTING_ROW_MIN_HEIGHT = 30 # Setting 每列最小高度
+CAMERA_SETTING_ROW_COUNT = 7 # Setting 控制列數量
+CAMERA_SETTING_MARGIN_X = 10 # Setting 左右留白
+CAMERA_SETTING_MARGIN_Y = 10 # Setting 上下留白
+CAMERA_SETTING_ROW_SPACING = 8 # Setting 列間距
+CAMERA_SETTING_DIALOG_MIN_HEIGHT = (
+    CAMERA_SETTING_ROW_COUNT * CAMERA_SETTING_ROW_MIN_HEIGHT
+    + (CAMERA_SETTING_ROW_COUNT - 1) * CAMERA_SETTING_ROW_SPACING
+    + 2 * CAMERA_SETTING_MARGIN_Y
+) # Setting 小視窗最小高度
+CAMERA_SETTING_LABEL_WIDTH = 118 # Setting 控制列名稱寬度
+CAMERA_SETTING_AUTO_WIDTH = 190 # Setting checkbox 寬度
 CAMERA_SETTING_VALUE_WIDTH = 90 # Setting 數值輸入寬度
 CAMERA_SETTING_SLIDER_SCALE = 100 # 小數設定轉成水平 slider 整數刻度
 CAMERA_EXPOSURE_MIN = 0.0 # 曝光控制最小值，實際支援依相機 driver
@@ -168,6 +168,15 @@ CAMERA_EXPOSURE_DEFAULT = 0.0 # 曝光手動控制預設值
 CAMERA_SHUTTER_MIN = -13.0 # 快門控制最小值，常見 UVC 使用負數
 CAMERA_SHUTTER_MAX = 0.0 # 快門控制最大值，常見 UVC 使用負數
 CAMERA_SHUTTER_DEFAULT = -6.0 # 快門手動控制預設值
+SETTING_DETECT_RATE_MIN = 1 # Setting Detect Rate 最小值
+SETTING_DETECT_RATE_MAX = 999 # Setting Detect Rate 最大值
+SETTING_DETECT_RATE_DEFAULT = 30 # Setting Detect Rate 預設值
+SETTING_BEEP_FREQ_MIN = 100 # Setting Sound Frequence 最小 Hz
+SETTING_BEEP_FREQ_MAX = 4000 # Setting Sound Frequence 最大 Hz
+SETTING_BEEP_FREQ_DEFAULT = 479 # Setting Sound Frequence 預設 Hz
+SETTING_GAIN_FACTOR_MIN = 1.0 # Setting Gain factor 最小值
+SETTING_GAIN_FACTOR_MAX = 4000.0 # Setting Gain factor 最大值
+SETTING_GAIN_FACTOR_DEFAULT = 20.0 # Setting Gain factor 預設值
 SETTING_RESET_BUTTON_STRETCH = 1 # Setting reset 按鈕 expand 比例
 SETTING_RESET_SPACER_STRETCH = 50 # Setting reset 右側透明拉伸比例
 SETTING_RESET_LABEL_WIDTH = CAMERA_SETTING_LABEL_WIDTH # Setting reset 標籤寬度
@@ -176,19 +185,15 @@ LOAD_MODE_MENU_WIDTH = 82 # toolbar Load Mode menu 寬度
 CAMERA_MENU_WIDTH = 72 # toolbar Camera menu 寬度
 ENHANCEMENT_MENU_WIDTH = 126 # toolbar Enhancement menu 寬度
 SHOW_RAW_CHECK_WIDTH = 85 # toolbar Show RAW checkbox 寬度
-DETECT_RATE_GROUP_WIDTH = 120 # toolbar Detect rate 群組寬度
-DETECT_RATE_LABEL_WIDTH = 64 # toolbar Detect rate label 寬度
-DETECT_RATE_SPIN_WIDTH = 46 # toolbar Detect rate 寬度
-SOUND_FREQ_GROUP_WIDTH = 125 # toolbar Sound freq. 群組寬度
-BEEP_LABEL_WIDTH = 70 # toolbar Sound freq. label 寬度
-BEEP_FREQ_SPIN_WIDTH = 45 # toolbar Beep Hz 寬度，最多顯示 4 位數
 MUTE_BUTTON_WIDTH = 58 # toolbar Mute 寬度
 TOPMOST_CHECK_WIDTH = 78 # toolbar Topmost checkbox 寬度
 STATUS_BAR_MAX_HEIGHT = 20 # 狀態列最大高度
+STATUS_PULSE_MS = 180 # fader 數值變動時狀態列亮起多久
+STATUS_PULSE_BG_HEX = WAVE_CURSOR_HEX # 狀態列短暫回饋顏色
 DEFAULT_MAX_ZOOM_SCALE = 16.0 # 影片滾輪縮放最大倍率
-DEFAULT_VERTICAL_SPLIT_RATIO = 0.22 # 上方板塊高度占比：1|2 / 3|4
-DEFAULT_TOP_HORIZONTAL_SPLIT_RATIO = 0.83 # 上方 1|2 左側示波器占比
-DEFAULT_BOTTOM_HORIZONTAL_SPLIT_RATIO = 0.83 # 下方 3|4 左側影像區占比
+DEFAULT_VERTICAL_SPLIT_RATIO = 0.26 # 上方板塊高度占比：1|2 / 3|4
+DEFAULT_TOP_HORIZONTAL_SPLIT_RATIO = 0.80 # 上方 1|2 左側示波器占比
+DEFAULT_BOTTOM_HORIZONTAL_SPLIT_RATIO = 0.80 # 下方 3|4 左側影像區占比
 APP_STYLE_TEMPLATE = """
 QMainWindow, QWidget {{
     background-color: {app_bg};
@@ -201,14 +206,14 @@ QMainWindow, QWidget {{
 QLabel {{
     color: {text};
 }}
-QPushButton, QComboBox, QSpinBox {{
+QPushButton, QComboBox {{
     background-color: {control_bg};
     color: {bright_text};
     border: 1px solid {control_border};
     border-radius: 4px;
     padding: {control_padding_y}px {control_padding_x}px;
 }}
-QPushButton:hover, QComboBox:hover, QSpinBox:hover {{
+QPushButton:hover, QComboBox:hover {{
     background-color: {control_hover};
 }}
 QPushButton:pressed {{
@@ -290,25 +295,19 @@ QStatusBar QLabel {{
     background-color: {app_bg};
     color: {text};
 }}
+QStatusBar[statusPulse="true"] {{
+    background-color: {status_pulse_bg};
+    color: {app_bg};
+    border-top: 1px solid {status_pulse_bg};
+}}
+QStatusBar QLabel[statusPulse="true"] {{
+    background-color: {status_pulse_bg};
+    color: {app_bg};
+}}
 QCheckBox {{
     background-color: transparent;
     color: {bright_text};
     spacing: 5px;
-}}
-#toolbarSpinGroup {{
-    background-color: {control_bg};
-    border: 1px solid {toolbar_group_border};
-    border-radius: {toolbar_group_radius}px;
-}}
-#toolbarSpinGroup QLabel {{
-    background-color: transparent;
-}}
-QSpinBox#toolbarInlineSpin {{
-    background-color: {control_bg};
-    color: {bright_text};
-    border: none;
-    margin-right: {toolbar_spin_margin_right}px;
-    padding: 2px {toolbar_spin_value_padding_x}px;
 }}
 """
 APP_STYLE = APP_STYLE_TEMPLATE.format(
@@ -321,10 +320,6 @@ APP_STYLE = APP_STYLE_TEMPLATE.format(
     control_pressed=CONTROL_PRESSED_HEX,
     control_padding_x=CONTROL_PADDING_X,
     control_padding_y=CONTROL_PADDING_Y,
-    toolbar_group_border=TOOLBAR_GROUP_BORDER_HEX,
-    toolbar_group_radius=TOOLBAR_GROUP_BORDER_RADIUS,
-    toolbar_spin_margin_right=TOOLBAR_SPIN_MARGIN_RIGHT,
-    toolbar_spin_value_padding_x=TOOLBAR_SPIN_VALUE_PADDING_X,
     toolbar_scroll_bg=TOOLBAR_SCROLL_BG_HEX,
     toolbar_scroll_handle=TOOLBAR_SCROLL_HANDLE_HEX,
     toolbar_scroll_handle_hover=TOOLBAR_SCROLL_HANDLE_HOVER_HEX,
@@ -338,6 +333,7 @@ APP_STYLE = APP_STYLE_TEMPLATE.format(
     slider_border_radius=SLIDER_BORDER_RADIUS,
     panel_bg=PANEL_BG_HEX,
     card_border=CARD_BORDER_HEX,
+    status_pulse_bg=STATUS_PULSE_BG_HEX,
 )
 PANEL_BG = hex_color(PANEL_BG_HEX)
 WAVE_GRID_COLOR = hex_color(WAVE_GRID_HEX) # 示波器格線顏色
@@ -375,6 +371,9 @@ class BorderCheckBox(QCheckBox):
 class CameraSettingsDialog(QDialog):
     exposure_changed = Signal(float)
     shutter_changed = Signal(float)
+    detect_rate_changed = Signal(int)
+    beep_frequency_changed = Signal(int)
+    gain_factor_changed = Signal(float)
     camera_auto_changed = Signal(bool)
     camera_reset_requested = Signal()
     software_control_changed = Signal(bool)
@@ -385,34 +384,42 @@ class CameraSettingsDialog(QDialog):
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
         self.setWindowTitle("Setting")
-        self.setMinimumWidth(CAMERA_SETTING_DIALOG_WIDTH)
+        self.setMinimumSize(CAMERA_SETTING_DIALOG_MIN_WIDTH, CAMERA_SETTING_DIALOG_MIN_HEIGHT)
         self.setWindowModality(Qt.WindowModality.NonModal)
         self._build_layout()
 
     # 建立相機設定與 reset 控制列
     def _build_layout(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(
+            CAMERA_SETTING_MARGIN_X,
+            CAMERA_SETTING_MARGIN_Y,
+            CAMERA_SETTING_MARGIN_X,
+            CAMERA_SETTING_MARGIN_Y,
+        )
+        layout.setSpacing(0)
+
+        self.settings_grid = QGridLayout()
+        self.settings_grid.setContentsMargins(0, 0, 0, 0)
+        self.settings_grid.setHorizontalSpacing(8)
+        self.settings_grid.setVerticalSpacing(CAMERA_SETTING_ROW_SPACING)
+        layout.addLayout(self.settings_grid, 1)
 
         self.software_control_check = BorderCheckBox("Use Software Camera Control")
-        self.software_control_check.setChecked(True)
+        self.software_control_check.setChecked(False)
         self.software_control_check.stateChanged.connect(self.change_software_control)
-        layout.addWidget(self.software_control_check)
-
-        camera_grid = QGridLayout()
-        camera_grid.setContentsMargins(0, 0, 0, 0)
-        camera_grid.setSpacing(8)
-        self.camera_auto_check = BorderCheckBox("Auto")
+        self.camera_auto_check = BorderCheckBox("Auto Exposure/Shutter")
         self.camera_auto_check.setChecked(False)
+        self.software_control_check.setFixedWidth(CAMERA_SETTING_AUTO_WIDTH)
         self.camera_auto_check.setFixedWidth(CAMERA_SETTING_AUTO_WIDTH)
-        self.camera_auto_check.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.software_control_check.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.camera_auto_check.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.camera_auto_check.stateChanged.connect(self.change_camera_auto)
-        camera_grid.addWidget(self.camera_auto_check, 0, 1, 2, 1)
+        self.settings_grid.addWidget(self.software_control_check, 0, 0, 1, 2, Qt.AlignmentFlag.AlignTop)
+        self.settings_grid.addWidget(self.camera_auto_check, 0, 2, 1, 2, Qt.AlignmentFlag.AlignTop)
 
         self.exposure_value, self.exposure_slider = self._add_camera_row(
-            camera_grid,
-            0,
+            1,
             "Exposure",
             CAMERA_EXPOSURE_MIN,
             CAMERA_EXPOSURE_MAX,
@@ -420,18 +427,46 @@ class CameraSettingsDialog(QDialog):
             self.exposure_changed,
         )
         self.shutter_value, self.shutter_slider = self._add_camera_row(
-            camera_grid,
-            1,
+            2,
             "Shutter",
             CAMERA_SHUTTER_MIN,
             CAMERA_SHUTTER_MAX,
             CAMERA_SHUTTER_DEFAULT,
             self.shutter_changed,
         )
-        camera_grid.setColumnStretch(3, 1)
-        layout.addLayout(camera_grid)
-        self._add_reset_row(layout)
-        self.set_camera_controls_enabled(True)
+        self.detect_rate_value, self.detect_rate_slider = self._add_integer_row(
+            3,
+            "Detect Rate",
+            SETTING_DETECT_RATE_MIN,
+            SETTING_DETECT_RATE_MAX,
+            SETTING_DETECT_RATE_DEFAULT,
+            self.detect_rate_changed,
+        )
+        self.beep_frequency_value, self.beep_frequency_slider = self._add_integer_row(
+            4,
+            "Sound Frequence",
+            SETTING_BEEP_FREQ_MIN,
+            SETTING_BEEP_FREQ_MAX,
+            SETTING_BEEP_FREQ_DEFAULT,
+            self.beep_frequency_changed,
+        )
+        self.gain_factor_value, self.gain_factor_spacer = self._add_double_spin_only_row(
+            5,
+            "Gain factor",
+            SETTING_GAIN_FACTOR_MIN,
+            SETTING_GAIN_FACTOR_MAX,
+            SETTING_GAIN_FACTOR_DEFAULT,
+            self.gain_factor_changed,
+        )
+        self._add_reset_row(6)
+        self.settings_grid.setColumnStretch(0, 0)
+        self.settings_grid.setColumnStretch(1, 0)
+        self.settings_grid.setColumnStretch(2, 0)
+        self.settings_grid.setColumnStretch(3, 1)
+        for row in range(CAMERA_SETTING_ROW_COUNT):
+            self.settings_grid.setRowMinimumHeight(row, CAMERA_SETTING_ROW_MIN_HEIGHT)
+            self.settings_grid.setRowStretch(row, 1)
+        self.set_camera_controls_enabled(False)
 
     # 切換是否允許 CV2 寫入 camera 設定
     def change_software_control(self, state: int) -> None:
@@ -468,13 +503,14 @@ class CameraSettingsDialog(QDialog):
         self.camera_auto_changed.emit(state == Qt.CheckState.Checked.value)
 
     # 建立 reset 功能列
-    def _add_reset_row(self, layout: QVBoxLayout) -> None:
+    def _add_reset_row(self, row: int) -> None:
         reset_label = QLabel("Reset")
         reset_label.setFixedWidth(SETTING_RESET_LABEL_WIDTH)
+        reset_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         roi_button = QPushButton("ROI")
         panel_button = QPushButton("Panel layout")
-        adjustment_button = QPushButton("Adjustment")
         camera_button = QPushButton("Camera")
+        adjustment_button = QPushButton("Adjustment")
         reset_spacer = QWidget()
         roi_button.clicked.connect(self.roi_reset_requested.emit)
         panel_button.clicked.connect(self.panel_reset_requested.emit)
@@ -484,16 +520,18 @@ class CameraSettingsDialog(QDialog):
         for button in (roi_button, panel_button, adjustment_button, camera_button):
             button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        reset_layout = QHBoxLayout()
-        reset_layout.setContentsMargins(0, 0, 0, 0)
-        reset_layout.setSpacing(8)
-        reset_layout.addWidget(reset_label)
-        reset_layout.addWidget(roi_button, SETTING_RESET_BUTTON_STRETCH)
-        reset_layout.addWidget(panel_button, SETTING_RESET_BUTTON_STRETCH)
-        reset_layout.addWidget(adjustment_button, SETTING_RESET_BUTTON_STRETCH)
-        reset_layout.addWidget(camera_button, SETTING_RESET_BUTTON_STRETCH)
-        reset_layout.addWidget(reset_spacer, SETTING_RESET_SPACER_STRETCH)
-        layout.addLayout(reset_layout)
+        buttons = QWidget()
+        buttons.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        button_layout = QHBoxLayout(buttons)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(8)
+        button_layout.addWidget(roi_button, SETTING_RESET_BUTTON_STRETCH)
+        button_layout.addWidget(panel_button, SETTING_RESET_BUTTON_STRETCH)
+        button_layout.addWidget(camera_button, SETTING_RESET_BUTTON_STRETCH)
+        button_layout.addWidget(adjustment_button, SETTING_RESET_BUTTON_STRETCH)
+        button_layout.addWidget(reset_spacer, SETTING_RESET_SPACER_STRETCH)
+        self.settings_grid.addWidget(reset_label, row, 0, Qt.AlignmentFlag.AlignTop)
+        self.settings_grid.addWidget(buttons, row, 1, 1, 3, Qt.AlignmentFlag.AlignTop)
 
     # 將相機控制列重置回預設值，不主動寫入 camera
     def reset_camera_controls(self) -> None:
@@ -510,6 +548,12 @@ class CameraSettingsDialog(QDialog):
             CAMERA_SHUTTER_DEFAULT,
         )
         self.camera_reset_requested.emit()
+
+    # 還原偵測與提示音設定
+    def reset_adjustments(self, detect_rate: int, beep_frequency: int, gain_factor: float) -> None:
+        self._set_integer_row_value(self.detect_rate_value, self.detect_rate_slider, detect_rate)
+        self._set_integer_row_value(self.beep_frequency_value, self.beep_frequency_slider, beep_frequency)
+        self._set_spin_value(self.gain_factor_value, gain_factor)
 
     # 還原單列相機控制的數值與 slider
     def _reset_camera_row(
@@ -546,7 +590,6 @@ class CameraSettingsDialog(QDialog):
     # 建立單列數值框和水平滑桿
     def _add_camera_row(
         self,
-        layout: QGridLayout,
         row: int,
         label_text: str,
         minimum: float,
@@ -556,6 +599,7 @@ class CameraSettingsDialog(QDialog):
     ) -> tuple[QDoubleSpinBox, QSlider]:
         label = QLabel(label_text)
         label.setFixedWidth(CAMERA_SETTING_LABEL_WIDTH)
+        label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         value_spin = QDoubleSpinBox()
         value_spin.setRange(minimum, maximum)
@@ -563,6 +607,7 @@ class CameraSettingsDialog(QDialog):
         value_spin.setSingleStep(1.0)
         value_spin.setValue(value)
         value_spin.setFixedWidth(CAMERA_SETTING_VALUE_WIDTH)
+        value_spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         slider = QSlider(Qt.Orientation.Horizontal)
         slider.setObjectName("cameraSettingSlider")
@@ -591,10 +636,101 @@ class CameraSettingsDialog(QDialog):
         slider.valueChanged.connect(update_spin)
         value_spin.valueChanged.connect(update_slider)
 
-        layout.addWidget(label, row, 0)
-        layout.addWidget(value_spin, row, 2)
-        layout.addWidget(slider, row, 3)
+        self.settings_grid.addWidget(label, row, 0, Qt.AlignmentFlag.AlignTop)
+        self.settings_grid.addWidget(value_spin, row, 1, Qt.AlignmentFlag.AlignTop)
+        self.settings_grid.addWidget(slider, row, 2, 1, 2, Qt.AlignmentFlag.AlignTop)
         return value_spin, slider
+
+    # 建立整數數值框和水平滑桿
+    def _add_integer_row(
+        self,
+        row: int,
+        label_text: str,
+        minimum: int,
+        maximum: int,
+        value: int,
+        changed_signal: Signal,
+    ) -> tuple[QSpinBox, QSlider]:
+        label = QLabel(label_text)
+        label.setFixedWidth(CAMERA_SETTING_LABEL_WIDTH)
+        label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        value_spin = QSpinBox()
+        value_spin.setRange(minimum, maximum)
+        value_spin.setValue(value)
+        value_spin.setFixedWidth(CAMERA_SETTING_VALUE_WIDTH)
+        value_spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setObjectName("cameraSettingSlider")
+        slider.setRange(minimum, maximum)
+        slider.setValue(value)
+        slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        def emit_value() -> None:
+            changed_signal.emit(value_spin.value())
+
+        def update_spin(slider_value: int) -> None:
+            value_spin.blockSignals(True)
+            value_spin.setValue(slider_value)
+            value_spin.blockSignals(False)
+            emit_value()
+
+        def update_slider(spin_value: int) -> None:
+            slider.blockSignals(True)
+            slider.setValue(spin_value)
+            slider.blockSignals(False)
+            emit_value()
+
+        slider.valueChanged.connect(update_spin)
+        value_spin.valueChanged.connect(update_slider)
+        self.settings_grid.addWidget(label, row, 0, Qt.AlignmentFlag.AlignTop)
+        self.settings_grid.addWidget(value_spin, row, 1, Qt.AlignmentFlag.AlignTop)
+        self.settings_grid.addWidget(slider, row, 2, 1, 2, Qt.AlignmentFlag.AlignTop)
+        return value_spin, slider
+
+    # 更新整數控制列但不要送出設定
+    def _set_integer_row_value(self, value_spin: QSpinBox, slider: QSlider, value: int) -> None:
+        value = max(value_spin.minimum(), min(value, value_spin.maximum()))
+        value_spin.blockSignals(True)
+        slider.blockSignals(True)
+        value_spin.setValue(value)
+        slider.setValue(value)
+        value_spin.blockSignals(False)
+        slider.blockSignals(False)
+
+    # 建立只有數值框和透明伸縮元件的小數列
+    def _add_double_spin_only_row(
+        self,
+        row: int,
+        label_text: str,
+        minimum: float,
+        maximum: float,
+        value: float,
+        changed_signal: Signal,
+    ) -> tuple[QDoubleSpinBox, QWidget]:
+        label = QLabel(label_text)
+        label.setFixedWidth(CAMERA_SETTING_LABEL_WIDTH)
+        label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        value_spin = QDoubleSpinBox()
+        value_spin.setRange(minimum, maximum)
+        value_spin.setDecimals(2)
+        value_spin.setSingleStep(1.0)
+        value_spin.setValue(value)
+        value_spin.setFixedWidth(CAMERA_SETTING_VALUE_WIDTH)
+        value_spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        value_spin.valueChanged.connect(changed_signal.emit)
+        self.settings_grid.addWidget(label, row, 0, Qt.AlignmentFlag.AlignTop)
+        self.settings_grid.addWidget(value_spin, row, 1, Qt.AlignmentFlag.AlignTop)
+        self.settings_grid.addWidget(spacer, row, 2, 1, 2, Qt.AlignmentFlag.AlignTop)
+        return value_spin, spacer
+
+    # 更新數值框但不要送出設定
+    def _set_spin_value(self, value_spin: QSpinBox | QDoubleSpinBox, value: int | float) -> None:
+        value = max(value_spin.minimum(), min(value, value_spin.maximum()))
+        value_spin.blockSignals(True)
+        value_spin.setValue(value)
+        value_spin.blockSignals(False)
 
 
 # 影片顯示與 ROI 編輯區
@@ -1339,7 +1475,7 @@ class MonitorWindow(QMainWindow):
             "Laplacian Edge",
             "Motion Edge",
         ]:
-            self.enhancement_menu.addItem(mode, mode)
+            self.enhancement_menu.addItem(f"Enhance: {mode}", mode)
         self.show_raw_check = BorderCheckBox("Show RAW")
         self.show_raw_check.setChecked(False)
         self.play_button = QPushButton("Play")
@@ -1349,27 +1485,16 @@ class MonitorWindow(QMainWindow):
         self.play_button.setIconSize(QSize(BUTTON_ICON_SIZE, BUTTON_ICON_SIZE))
         self.play_button.setText("")
         self.play_button.setToolTip("Play")
+        self.fit_button = QPushButton("Fit")
+        self.fit_button.setIcon(QIcon(str(ASSET_DIR / "fit.svg")))
+        self.fit_button.setIconSize(QSize(BUTTON_ICON_SIZE, BUTTON_ICON_SIZE))
+        self.fit_button.setText("")
+        self.fit_button.setToolTip("Fit to Window")
         self.camera_settings_button = QPushButton("Setting")
         self.camera_settings_button.setIcon(QIcon(str(ASSET_DIR / "setting.svg")))
         self.camera_settings_button.setIconSize(QSize(BUTTON_ICON_SIZE, BUTTON_ICON_SIZE))
         self.camera_settings_button.setText("")
         self.camera_settings_button.setToolTip("Setting")
-        self.detect_rate_label = QLabel("Detect rate")
-        self.detect_rate_spin = QSpinBox()
-        self.detect_rate_spin.setRange(1, 999)
-        self.detect_rate_spin.setSingleStep(1)
-        self.detect_rate_spin.setValue(60)
-        self.detect_rate_spin.setObjectName("toolbarInlineSpin")
-        self.detect_rate_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.detect_rate_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-        self.beep_label = QLabel("Sound freq.")
-        self.beep_frequency_spin = QSpinBox()
-        self.beep_frequency_spin.setRange(100, 4000)
-        self.beep_frequency_spin.setSingleStep(1)
-        self.beep_frequency_spin.setValue(479)
-        self.beep_frequency_spin.setObjectName("toolbarInlineSpin")
-        self.beep_frequency_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.beep_frequency_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.mute_button = BorderCheckBox("Mute")
         self.mute_button.setChecked(False)
         self.topmost_check = BorderCheckBox("Topmost")
@@ -1389,64 +1514,22 @@ class MonitorWindow(QMainWindow):
         self.show_raw_check.setMinimumWidth(SHOW_RAW_CHECK_WIDTH)
         self.show_raw_check.setFixedHeight(CONTROL_WIDGET_HEIGHT)
         self.play_button.setFixedSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE)
+        self.fit_button.setFixedSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE)
         self.camera_settings_button.setFixedSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE)
-        self.detect_rate_label.setFixedWidth(DETECT_RATE_LABEL_WIDTH)
-        self.detect_rate_label.setFixedHeight(TOOLBAR_GROUP_SPIN_HEIGHT)
-        self.detect_rate_spin.setMinimumWidth(DETECT_RATE_SPIN_WIDTH)
-        self.detect_rate_spin.setFixedHeight(TOOLBAR_GROUP_SPIN_HEIGHT)
-        self.detect_rate_spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.beep_label.setFixedWidth(BEEP_LABEL_WIDTH)
-        self.beep_label.setFixedHeight(TOOLBAR_GROUP_SPIN_HEIGHT)
-        self.beep_frequency_spin.setMinimumWidth(BEEP_FREQ_SPIN_WIDTH)
-        self.beep_frequency_spin.setFixedHeight(TOOLBAR_GROUP_SPIN_HEIGHT)
-        self.beep_frequency_spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.mute_button.setMinimumWidth(MUTE_BUTTON_WIDTH)
         self.mute_button.setFixedHeight(CONTROL_WIDGET_HEIGHT)
         self.topmost_check.setMinimumWidth(TOPMOST_CHECK_WIDTH)
         self.topmost_check.setFixedHeight(CONTROL_WIDGET_HEIGHT)
-
-        # toolbar 小群組：群組內零間距，群組之間使用 toolbar 固定間距
-        def make_toolbar_pair(label: QLabel, widget: QWidget, width: int) -> QFrame:
-            pair = QFrame()
-            pair.setObjectName("toolbarSpinGroup")
-            pair.setFrameShape(QFrame.Shape.NoFrame)
-            pair.setContentsMargins(0, 0, 0, 0)
-            pair.setFixedHeight(CONTROL_WIDGET_HEIGHT)
-            pair.setMinimumWidth(width)
-            pair.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            pair_layout = QHBoxLayout(pair)
-            pair_layout.setContentsMargins(
-                TOOLBAR_GROUP_PADDING_X,
-                TOOLBAR_GROUP_PADDING_Y,
-                TOOLBAR_GROUP_PADDING_X,
-                TOOLBAR_GROUP_PADDING_Y,
-            )
-            pair_layout.setSpacing(TOOLBAR_GROUP_SPACING)
-            pair_layout.addWidget(label)
-            pair_layout.addWidget(widget, 1)
-            return pair
-
-        self.detect_rate_group = make_toolbar_pair(
-            self.detect_rate_label,
-            self.detect_rate_spin,
-            DETECT_RATE_GROUP_WIDTH,
-        )
-        self.beep_group = make_toolbar_pair(
-            self.beep_label,
-            self.beep_frequency_spin,
-            SOUND_FREQ_GROUP_WIDTH,
-        )
 
         toolbar.addWidget(self.load_mode_menu, TOOLBAR_MENU_STRETCH)
         toolbar.addWidget(self.camera_menu, TOOLBAR_MENU_STRETCH)
         toolbar.addWidget(self.open_video_button)
         toolbar.addWidget(self.scan_camera_button)
         toolbar.addWidget(self.play_button)
-        toolbar.addWidget(self.camera_settings_button)
+        toolbar.addWidget(self.fit_button)
         toolbar.addWidget(self.enhancement_menu, TOOLBAR_ENHANCE_STRETCH)
+        toolbar.addWidget(self.camera_settings_button)
         toolbar.addWidget(self.show_raw_check)
-        toolbar.addWidget(self.detect_rate_group, TOOLBAR_SPIN_GROUP_STRETCH)
-        toolbar.addWidget(self.beep_group, TOOLBAR_SPIN_GROUP_STRETCH)
         toolbar.addWidget(self.mute_button)
         toolbar.addWidget(self.topmost_check)
 
@@ -1619,6 +1702,9 @@ class MonitorWindow(QMainWindow):
         self.status_bar.setMaximumHeight(STATUS_BAR_MAX_HEIGHT)
         self.status_bar.addWidget(self.status_label, 1)
         self.setStatusBar(self.status_bar)
+        self.status_pulse_timer = QTimer(self)
+        self.status_pulse_timer.setSingleShot(True)
+        self.status_pulse_timer.timeout.connect(self.clear_status_pulse)
 
         self.set_load_mode("Camera")
         self.set_rpm(None)
@@ -1653,8 +1739,31 @@ class MonitorWindow(QMainWindow):
         self.video.set_roi_editing(not playing)
 
     # 更新狀態列
-    def set_status(self, text: str) -> None:
+    def set_status(self, text: str, pulse: bool = False) -> None:
         self.status_label.setText(text)
+        if pulse:
+            self.pulse_status()
+
+    # 讓狀態列短暫亮起，方便小視窗操作時確認數值有變
+    def pulse_status(self) -> None:
+        self.status_pulse_timer.stop()
+        self.status_bar.setProperty("statusPulse", True)
+        self.status_label.setProperty("statusPulse", True)
+        self._refresh_status_style()
+        self.status_pulse_timer.start(STATUS_PULSE_MS)
+
+    # 還原狀態列回一般樣式
+    def clear_status_pulse(self) -> None:
+        self.status_bar.setProperty("statusPulse", False)
+        self.status_label.setProperty("statusPulse", False)
+        self._refresh_status_style()
+
+    # 動態 property 改變後刷新 Qt stylesheet
+    def _refresh_status_style(self) -> None:
+        for widget in (self.status_bar, self.status_label):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+            widget.update()
 
     # 更新靜音按鈕狀態
     def set_muted(self, muted: bool) -> None:
