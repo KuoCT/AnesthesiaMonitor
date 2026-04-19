@@ -10,6 +10,8 @@ from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDoubleSpinBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -154,12 +156,25 @@ TOOLBAR_SCROLL_BG_HEX = APP_BG_HEX # toolbar scroll 背景色
 TOOLBAR_SCROLL_HANDLE_HEX = "#90929C" # toolbar scroll handle 顏色
 TOOLBAR_SCROLL_HANDLE_HOVER_HEX = "#71737A" # toolbar scroll hover 顏色
 TOOLBAR_SCROLLBAR_HEIGHT = 4 # toolbar 水平 scroll 高度
+TOOLBAR_SCROLL_BOTTOM_RESERVED_HEIGHT = 4 # toolbar 內容下方預留給水平 scroll 的空白
+CAMERA_SETTING_DIALOG_WIDTH = 420 # Setting 小視窗寬度
+CAMERA_SETTING_LABEL_WIDTH = 64 # Setting 相機設定名稱寬度
+CAMERA_SETTING_AUTO_WIDTH = 54 # Setting auto checkbox 寬度
+CAMERA_SETTING_VALUE_WIDTH = 83 # Setting 數值輸入寬度
+CAMERA_SETTING_SLIDER_SCALE = 100 # 小數設定轉成水平 slider 整數刻度
+CAMERA_EXPOSURE_MIN = 0.0 # 曝光控制最小值，實際支援依相機 driver
+CAMERA_EXPOSURE_MAX = 255.0 # 曝光控制最大值，實際支援依相機 driver
+CAMERA_EXPOSURE_DEFAULT = 0.0 # 曝光手動控制預設值
+CAMERA_SHUTTER_MIN = -13.0 # 快門控制最小值，常見 UVC 使用負數
+CAMERA_SHUTTER_MAX = 0.0 # 快門控制最大值，常見 UVC 使用負數
+CAMERA_SHUTTER_DEFAULT = -6.0 # 快門手動控制預設值
+SETTING_RESET_BUTTON_STRETCH = 1 # Setting reset 按鈕 expand 比例
+SETTING_RESET_SPACER_STRETCH = 50 # Setting reset 右側透明拉伸比例
+SETTING_RESET_LABEL_WIDTH = CAMERA_SETTING_LABEL_WIDTH # Setting reset 標籤寬度
 CONTROL_WIDGET_HEIGHT = 32 # 按鈕和下拉選單統一高度
 LOAD_MODE_MENU_WIDTH = 82 # toolbar Load Mode menu 寬度
 CAMERA_MENU_WIDTH = 72 # toolbar Camera menu 寬度
 ENHANCEMENT_MENU_WIDTH = 126 # toolbar Enhancement menu 寬度
-CLEAR_ROI_BUTTON_WIDTH = 78 # toolbar Clear ROI 寬度
-RESET_BUTTON_WIDTH = 58 # toolbar Reset 寬度
 SHOW_RAW_CHECK_WIDTH = 85 # toolbar Show RAW checkbox 寬度
 DETECT_RATE_GROUP_WIDTH = 120 # toolbar Detect rate 群組寬度
 DETECT_RATE_LABEL_WIDTH = 64 # toolbar Detect rate label 寬度
@@ -242,6 +257,9 @@ QSlider::groove:vertical {{
 }}
 QSlider {{
     background-color: {panel_bg};
+}}
+QSlider#cameraSettingSlider {{
+    background-color: {app_bg};
 }}
 QSlider::handle:vertical {{
     background-color: {bright_text};
@@ -351,6 +369,179 @@ class BorderCheckBox(QCheckBox):
         painter.setPen(QPen(hex_color(CHECKBOX_BORDER_HEX), 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(indicator.adjusted(0, 0, -1, -1))
+
+
+# Setting 小視窗
+class CameraSettingsDialog(QDialog):
+    exposure_changed = Signal(bool, float)
+    shutter_changed = Signal(bool, float)
+    roi_reset_requested = Signal()
+    panel_reset_requested = Signal()
+    adjustment_reset_requested = Signal()
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Setting")
+        self.setMinimumWidth(CAMERA_SETTING_DIALOG_WIDTH)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self._build_layout()
+
+    # 建立相機設定與 reset 控制列
+    def _build_layout(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        self.exposure_auto, self.exposure_value, self.exposure_slider = self._add_camera_row(
+            layout,
+            "Exposure",
+            CAMERA_EXPOSURE_MIN,
+            CAMERA_EXPOSURE_MAX,
+            CAMERA_EXPOSURE_DEFAULT,
+            self.exposure_changed,
+        )
+        self.shutter_auto, self.shutter_value, self.shutter_slider = self._add_camera_row(
+            layout,
+            "Shutter",
+            CAMERA_SHUTTER_MIN,
+            CAMERA_SHUTTER_MAX,
+            CAMERA_SHUTTER_DEFAULT,
+            self.shutter_changed,
+        )
+        self._add_reset_row(layout)
+
+    # 建立 reset 功能列
+    def _add_reset_row(self, layout: QVBoxLayout) -> None:
+        reset_label = QLabel("Reset")
+        reset_label.setFixedWidth(SETTING_RESET_LABEL_WIDTH)
+        roi_button = QPushButton("ROI")
+        panel_button = QPushButton("Panel layout")
+        adjustment_button = QPushButton("Adjustment")
+        camera_button = QPushButton("Camera")
+        reset_spacer = QWidget()
+        roi_button.clicked.connect(self.roi_reset_requested.emit)
+        panel_button.clicked.connect(self.panel_reset_requested.emit)
+        adjustment_button.clicked.connect(self.adjustment_reset_requested.emit)
+        camera_button.clicked.connect(self.reset_camera_controls)
+
+        for button in (roi_button, panel_button, adjustment_button, camera_button):
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        reset_layout = QHBoxLayout()
+        reset_layout.setContentsMargins(0, 0, 0, 0)
+        reset_layout.setSpacing(8)
+        reset_layout.addWidget(reset_label)
+        reset_layout.addWidget(roi_button, SETTING_RESET_BUTTON_STRETCH)
+        reset_layout.addWidget(panel_button, SETTING_RESET_BUTTON_STRETCH)
+        reset_layout.addWidget(adjustment_button, SETTING_RESET_BUTTON_STRETCH)
+        reset_layout.addWidget(camera_button, SETTING_RESET_BUTTON_STRETCH)
+        reset_layout.addWidget(reset_spacer, SETTING_RESET_SPACER_STRETCH)
+        layout.addLayout(reset_layout)
+
+    # 將相機控制列重置回 auto
+    def reset_camera_controls(self) -> None:
+        self._reset_camera_row(
+            self.exposure_auto,
+            self.exposure_value,
+            self.exposure_slider,
+            CAMERA_EXPOSURE_DEFAULT,
+        )
+        self._reset_camera_row(
+            self.shutter_auto,
+            self.shutter_value,
+            self.shutter_slider,
+            CAMERA_SHUTTER_DEFAULT,
+        )
+        self.exposure_changed.emit(True, CAMERA_EXPOSURE_DEFAULT)
+        self.shutter_changed.emit(True, CAMERA_SHUTTER_DEFAULT)
+
+    # 還原單列相機控制的 auto、數值與 slider
+    def _reset_camera_row(
+        self,
+        auto_check: QCheckBox,
+        value_spin: QDoubleSpinBox,
+        slider: QSlider,
+        value: float,
+    ) -> None:
+        auto_check.blockSignals(True)
+        value_spin.blockSignals(True)
+        slider.blockSignals(True)
+        auto_check.setChecked(True)
+        value_spin.setValue(value)
+        slider.setValue(round(value * CAMERA_SETTING_SLIDER_SCALE))
+        value_spin.setEnabled(False)
+        slider.setEnabled(False)
+        auto_check.blockSignals(False)
+        value_spin.blockSignals(False)
+        slider.blockSignals(False)
+
+    # 建立單列 auto checkbox、數值框和水平滑桿
+    def _add_camera_row(
+        self,
+        layout: QVBoxLayout,
+        label_text: str,
+        minimum: float,
+        maximum: float,
+        value: float,
+        changed_signal: Signal,
+    ) -> tuple[QCheckBox, QDoubleSpinBox, QSlider]:
+        label = QLabel(label_text)
+        label.setFixedWidth(CAMERA_SETTING_LABEL_WIDTH)
+        auto_check = BorderCheckBox("auto")
+        auto_check.setChecked(True)
+        auto_check.setFixedWidth(CAMERA_SETTING_AUTO_WIDTH)
+
+        value_spin = QDoubleSpinBox()
+        value_spin.setRange(minimum, maximum)
+        value_spin.setDecimals(2)
+        value_spin.setSingleStep(1.0)
+        value_spin.setValue(value)
+        value_spin.setFixedWidth(CAMERA_SETTING_VALUE_WIDTH)
+
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setObjectName("cameraSettingSlider")
+        slider.setRange(
+            round(minimum * CAMERA_SETTING_SLIDER_SCALE),
+            round(maximum * CAMERA_SETTING_SLIDER_SCALE),
+        )
+        slider.setValue(round(value * CAMERA_SETTING_SLIDER_SCALE))
+        slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        def emit_value() -> None:
+            changed_signal.emit(auto_check.isChecked(), value_spin.value())
+
+        def set_manual_enabled() -> None:
+            enabled = not auto_check.isChecked()
+            value_spin.setEnabled(enabled)
+            slider.setEnabled(enabled)
+            emit_value()
+
+        def update_spin(slider_value: int) -> None:
+            value_spin.blockSignals(True)
+            value_spin.setValue(slider_value / CAMERA_SETTING_SLIDER_SCALE)
+            value_spin.blockSignals(False)
+            emit_value()
+
+        def update_slider(spin_value: float) -> None:
+            slider.blockSignals(True)
+            slider.setValue(round(spin_value * CAMERA_SETTING_SLIDER_SCALE))
+            slider.blockSignals(False)
+            emit_value()
+
+        auto_check.stateChanged.connect(set_manual_enabled)
+        slider.valueChanged.connect(update_spin)
+        value_spin.valueChanged.connect(update_slider)
+        set_manual_enabled()
+
+        row_layout = QHBoxLayout()
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(8)
+        row_layout.addWidget(label)
+        row_layout.addWidget(auto_check)
+        row_layout.addWidget(value_spin)
+        row_layout.addWidget(slider, 1)
+        layout.addLayout(row_layout)
+        return auto_check, value_spin, slider
 
 
 # 影片顯示與 ROI 編輯區
@@ -1007,6 +1198,7 @@ class MonitorWindow(QMainWindow):
         self.setWindowIcon(QIcon(str(ASSET_DIR / "logo.svg")))
         self.setStyleSheet(APP_STYLE)
         self.resize(*DEFAULT_APP_SIZE)
+        self.camera_settings_dialog: CameraSettingsDialog | None = None
         set_windows_title_bar_color(self)
         self._build_layout(camera_indexes)
 
@@ -1031,7 +1223,7 @@ class MonitorWindow(QMainWindow):
         self.toolbar_content.setFixedWidth(TOOLBAR_GROUP_WIDTH)
         self.toolbar_content.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         toolbar = QHBoxLayout(self.toolbar_content)
-        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setContentsMargins(0, 0, 0, TOOLBAR_SCROLL_BOTTOM_RESERVED_HEIGHT)
         toolbar.setSpacing(TOOLBAR_ITEM_SPACING)
         self.load_mode_menu = QComboBox()
         self.load_mode_menu.addItems(["Camera", "Video"])
@@ -1067,8 +1259,11 @@ class MonitorWindow(QMainWindow):
         self.play_button.setIconSize(QSize(BUTTON_ICON_SIZE, BUTTON_ICON_SIZE))
         self.play_button.setText("")
         self.play_button.setToolTip("Play")
-        self.clear_roi_button = QPushButton("Clear ROI")
-        self.reset_button = QPushButton("Reset")
+        self.camera_settings_button = QPushButton("Setting")
+        self.camera_settings_button.setIcon(QIcon(str(ASSET_DIR / "setting.svg")))
+        self.camera_settings_button.setIconSize(QSize(BUTTON_ICON_SIZE, BUTTON_ICON_SIZE))
+        self.camera_settings_button.setText("")
+        self.camera_settings_button.setToolTip("Setting")
         self.detect_rate_label = QLabel("Detect rate")
         self.detect_rate_spin = QSpinBox()
         self.detect_rate_spin.setRange(1, 999)
@@ -1104,10 +1299,7 @@ class MonitorWindow(QMainWindow):
         self.show_raw_check.setMinimumWidth(SHOW_RAW_CHECK_WIDTH)
         self.show_raw_check.setFixedHeight(CONTROL_WIDGET_HEIGHT)
         self.play_button.setFixedSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE)
-        self.clear_roi_button.setMinimumWidth(CLEAR_ROI_BUTTON_WIDTH)
-        self.clear_roi_button.setFixedHeight(CONTROL_WIDGET_HEIGHT)
-        self.reset_button.setMinimumWidth(RESET_BUTTON_WIDTH)
-        self.reset_button.setFixedHeight(CONTROL_WIDGET_HEIGHT)
+        self.camera_settings_button.setFixedSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE)
         self.detect_rate_label.setFixedWidth(DETECT_RATE_LABEL_WIDTH)
         self.detect_rate_label.setFixedHeight(TOOLBAR_GROUP_SPIN_HEIGHT)
         self.detect_rate_spin.setMinimumWidth(DETECT_RATE_SPIN_WIDTH)
@@ -1160,14 +1352,13 @@ class MonitorWindow(QMainWindow):
         toolbar.addWidget(self.open_video_button)
         toolbar.addWidget(self.scan_camera_button)
         toolbar.addWidget(self.play_button)
-        toolbar.addWidget(self.clear_roi_button)
+        toolbar.addWidget(self.camera_settings_button)
         toolbar.addWidget(self.enhancement_menu, TOOLBAR_ENHANCE_STRETCH)
         toolbar.addWidget(self.show_raw_check)
         toolbar.addWidget(self.detect_rate_group, TOOLBAR_SPIN_GROUP_STRETCH)
         toolbar.addWidget(self.beep_group, TOOLBAR_SPIN_GROUP_STRETCH)
         toolbar.addWidget(self.mute_button)
         toolbar.addWidget(self.topmost_check)
-        toolbar.addWidget(self.reset_button)
 
         self.toolbar_content.adjustSize()
         self.toolbar_content.setFixedHeight(self.toolbar_content.sizeHint().height())
@@ -1183,6 +1374,7 @@ class MonitorWindow(QMainWindow):
         self.toolbar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.toolbar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.toolbar_scroll.setMinimumWidth(0)
+        self.toolbar_scroll.setFixedHeight(self.toolbar_content.height() + TOOLBAR_SCROLLBAR_HEIGHT)
         self.toolbar_scroll.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
 
         self.waveform = WaveformWidget()
@@ -1340,6 +1532,16 @@ class MonitorWindow(QMainWindow):
 
         self.set_load_mode("Camera")
         self.set_rpm(None)
+
+    # 顯示 setting 小視窗
+    def show_camera_settings(self) -> CameraSettingsDialog:
+        if self.camera_settings_dialog is None:
+            self.camera_settings_dialog = CameraSettingsDialog(self)
+        self.camera_settings_dialog.show()
+        set_windows_title_bar_color(self.camera_settings_dialog)
+        self.camera_settings_dialog.raise_()
+        self.camera_settings_dialog.activateWindow()
+        return self.camera_settings_dialog
 
     # 更新 camera 下拉選單
     def set_camera_indexes(self, indexes: list[str]) -> None:

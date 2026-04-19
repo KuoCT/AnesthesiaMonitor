@@ -11,17 +11,23 @@ from time import perf_counter
 
 import cv2
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PySide6.QtGui import QImage, QKeySequence, QShortcut
+from PySide6.QtWidgets import QApplication, QFileDialog
 
 from GUI import MonitorWindow
 
 
 # 參數控制區
 APP_NAME = "Anesthesia Monitor" # App 顯示名稱
-APP_VERSION = "1.0.1" # App 版本號
-APP_TITLE = f"{APP_NAME} v{APP_VERSION}" # 視窗標題統一由 main 注入
+APP_VERSION = "1.1.0" # App 版本號
+APP_TITLE = f"{APP_NAME} {APP_VERSION}" # 視窗標題統一由 main 注入
 DEFAULT_CAMERA_INDEXES = tuple(range(6)) # 第一版先列出常見 camera index
+CAMERA_AUTO_EXPOSURE_VALUE: float | None = 0.25 # 手動快門時送給 DSHOW 的自動曝光關閉值
+CAMERA_AUTO_EXPOSURE_AUTO_VALUE: float | None = 0.75 # 勾回 auto 時請相機重新自動計算曝光
+CAMERA_EXPOSURE_VALUE: float | None = None # None 表示不改曝光增益，實際範圍依相機驅動
+CAMERA_SHUTTER_VALUE: float | None = None # None 表示不改快門/曝光時間，實際範圍依相機驅動
+CAMERA_EXPOSURE_PROPERTY = cv2.CAP_PROP_GAIN # 曝光列對應 OpenCV gain
+CAMERA_SHUTTER_PROPERTY = cv2.CAP_PROP_EXPOSURE # 快門列對應 OpenCV exposure
 DEFAULT_FPS = 30.0 # 攝影機或影片讀不到 FPS 時使用
 SIGNAL_WINDOW_SECONDS = 5.0 # 波型顯示最近幾秒
 MIN_ROI_SIZE = 8 # ROI 太小通常是誤畫
@@ -56,6 +62,7 @@ DETECTION_RANGE_DEFAULT = TRACK_SEARCH_MARGIN # 偵測範圍拉桿預設像素
 BEEP_FREQUENCY_HZ = 479 # 呼吸 peak 提示音頻率
 BEEP_DURATION_MS = 100 # 呼吸 peak 提示音長度
 VIEW_NAV_HINT = "Wheel to zoom, middle-drag to pan." # 影像操作提示
+ROI_DELETE_HINT = "Press Del to clear ROI while paused." # 暫停時可刪除 ROI 的提示
 
 
 # 將 FPS 顯示成精簡文字
@@ -135,7 +142,23 @@ class CaptureSource:
     # 開啟指定攝影機
     def open_camera(self, index: int) -> bool:
         capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        self._apply_camera_exposure(capture)
         return self._open(capture, f"Camera {index}", "Camera", str(index))
+
+    # 套用一次性的相機曝光設定
+    def _apply_camera_exposure(self, capture: cv2.VideoCapture) -> None:
+        if CAMERA_AUTO_EXPOSURE_VALUE is not None:
+            capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, CAMERA_AUTO_EXPOSURE_VALUE)
+        if CAMERA_EXPOSURE_VALUE is not None:
+            capture.set(CAMERA_EXPOSURE_PROPERTY, CAMERA_EXPOSURE_VALUE)
+        if CAMERA_SHUTTER_VALUE is not None:
+            capture.set(CAMERA_SHUTTER_PROPERTY, CAMERA_SHUTTER_VALUE)
+
+    # 即時套用目前相機設定
+    def set_camera_property(self, property_id: int, value: float) -> bool:
+        if self.capture is None or self.mode != "Camera":
+            return False
+        return bool(self.capture.set(property_id, value))
 
     # 套用新的 OpenCV capture
     def _open(self, capture: cv2.VideoCapture, label: str, mode: str, identifier: str) -> bool:
@@ -472,6 +495,9 @@ class MonitorController:
         self.muted = False
         self.beep_frequency_hz = BEEP_FREQUENCY_HZ
         self.detection_rate_hz = DETECTION_RATE_DEFAULT_HZ
+        self.camera_settings_connected = False
+        self.delete_roi_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), self.window)
+        self.delete_roi_shortcut.activated.connect(self.clear_roi_when_paused)
         self.apply_topmost()
         self._connect_events()
 
@@ -481,8 +507,7 @@ class MonitorController:
         self.window.open_video_button.clicked.connect(self.open_video)
         self.window.scan_camera_button.clicked.connect(self.scan_cameras)
         self.window.play_button.clicked.connect(self.toggle_play)
-        self.window.clear_roi_button.clicked.connect(self.clear_roi)
-        self.window.reset_button.clicked.connect(self.choose_reset)
+        self.window.camera_settings_button.clicked.connect(self.show_camera_settings)
         self.window.mute_button.clicked.connect(self.toggle_mute)
         self.window.topmost_check.clicked.connect(self.toggle_topmost)
         self.window.detect_rate_spin.valueChanged.connect(self.change_detection_rate)
@@ -621,26 +646,38 @@ class MonitorController:
         self.window.video.fit_to_window()
         self.window.set_status(with_view_hint("Layout reset. Video fit to window."))
 
-    # 選擇要重置的項目
-    def choose_reset(self) -> None:
-        dialog = QMessageBox(self.window)
-        dialog.setWindowTitle("Reset")
-        dialog.setText("Select what you want to reset.")
-        layout_button = dialog.addButton("Layout", QMessageBox.ButtonRole.AcceptRole)
-        settings_button = dialog.addButton("Settings", QMessageBox.ButtonRole.AcceptRole)
-        both_button = dialog.addButton("Both", QMessageBox.ButtonRole.AcceptRole)
-        dialog.addButton(QMessageBox.StandardButton.Cancel)
-        dialog.exec()
+    # 顯示 setting 小視窗
+    def show_camera_settings(self) -> None:
+        dialog = self.window.show_camera_settings()
+        if not self.camera_settings_connected:
+            dialog.exposure_changed.connect(self.change_camera_exposure)
+            dialog.shutter_changed.connect(self.change_camera_shutter)
+            dialog.roi_reset_requested.connect(self.clear_roi)
+            dialog.panel_reset_requested.connect(self.reset_layout)
+            dialog.adjustment_reset_requested.connect(self.reset_settings)
+            self.camera_settings_connected = True
 
-        clicked_button = dialog.clickedButton()
-        if clicked_button == layout_button:
-            self.reset_layout()
-        elif clicked_button == settings_button:
-            self.reset_settings()
-        elif clicked_button == both_button:
-            self.reset_layout()
-            self.reset_settings()
-            self.window.set_status("Layout and settings reset.")
+    # 即時更新相機曝光增益
+    def change_camera_exposure(self, auto_enabled: bool, value: float) -> None:
+        self.change_camera_property(auto_enabled, CAMERA_EXPOSURE_PROPERTY, value, "Exposure")
+
+    # 即時更新相機快門/曝光時間
+    def change_camera_shutter(self, auto_enabled: bool, value: float) -> None:
+        self.change_camera_property(auto_enabled, CAMERA_SHUTTER_PROPERTY, value, "Shutter")
+
+    # 套用 Setting 小視窗的相機控制值
+    def change_camera_property(self, auto_enabled: bool, property_id: int, value: float, label: str) -> None:
+        if auto_enabled:
+            if CAMERA_AUTO_EXPOSURE_AUTO_VALUE is not None:
+                self.source.set_camera_property(cv2.CAP_PROP_AUTO_EXPOSURE, CAMERA_AUTO_EXPOSURE_AUTO_VALUE)
+            self.window.set_status(f"{label} set to auto.")
+            return
+        if CAMERA_AUTO_EXPOSURE_VALUE is not None:
+            self.source.set_camera_property(cv2.CAP_PROP_AUTO_EXPOSURE, CAMERA_AUTO_EXPOSURE_VALUE)
+        if self.source.set_camera_property(property_id, value):
+            self.window.set_status(f"{label} set to {value:.2f}.")
+        else:
+            self.window.set_status(f"{label} setting is not available for the current camera.")
 
     # 還原偵測相關設定
     def reset_settings(self) -> None:
@@ -714,7 +751,7 @@ class MonitorController:
             self._start_timer()
         else:
             self.timer.stop()
-            self.window.set_status(with_view_hint("Paused. Drag on the video to draw an ROI."))
+            self.window.set_status(with_view_hint(f"Paused. Drag on the video to draw an ROI. {ROI_DELETE_HINT}"))
 
     # 判斷是否需要開啟或切換相機
     def _should_open_selected_camera(self) -> bool:
@@ -751,6 +788,15 @@ class MonitorController:
         self.window.waveform.set_values(self.tracker.series(), self.tracker.cursor())
         self.window.set_rpm(None)
         self.window.set_status("ROI cleared.")
+
+    # 暫停時用 Del 清除目前 ROI
+    def clear_roi_when_paused(self) -> None:
+        if self.playing:
+            return
+        if self.roi is None:
+            self.window.set_status("No ROI to clear.")
+            return
+        self.clear_roi()
 
     # 套用新 ROI
     def set_roi(self, x: int, y: int, width: int, height: int) -> None:
