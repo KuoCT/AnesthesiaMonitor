@@ -11,6 +11,15 @@ The UI is built with PySide6, and video capture and image processing are handled
 - uv
 - An infrared camera, or a video file for testing
 
+## Get the Source Code
+
+Clone the repository:
+
+```powershell
+git clone https://github.com/KuoCT/AnesthesiaMonitor.git
+cd AnesthesiaMonitor
+```
+
 ## Installation
 
 Run this command from the project directory:
